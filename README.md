@@ -17,6 +17,18 @@ Ha STA módban az ESP32 **60 másodpercen belül nem tud csatlakozni**, automati
 
 A webes konfigurációs oldal használatával beállítható az AP/STA mód, a WiFi név és jelszó, az AP csatornája, valamint az AgOpenGPS UDP portja. Az AgOpenGPS adatkommunikáció alapértelmezett portja `8888`, az RTCM korrekciós adatok fogadására szolgáló port pedig `2233`. A beállítások mentés után újraindításkor is megmaradnak.
 
+### Telemetria tab (élő értékek)
+
+A webes felület két fülre van osztva: a **Beállítások** fülön található a WiFi konfiguráció és a debug log, az új **Telemetria** fülön pedig a fontosabb futásidejű értékek jelennek meg, **10 másodpercenként automatikusan frissítve** (a `/status` JSON végpontról), kézi frissítés gombbal. A lista az **AUTOTUNE Kd** (öntanult D tag) értékkel kezdődik, majd további csoportokban mutatja:
+
+- **AUTOTUNE / PID:** Kd, Kp, Ki, I és P tag kimenete, szöghiba, PWM kimenet
+- **Autokormány:** engedélyezett állapot, tényleges/cél kormányszög, utolsó AgIO csomag kora
+- **Érzékelők (ADC):** WAS nyers/szűrt értékek, áramszenzor ADC és autózéró nulla pont, `sensorReading`
+- **GPS / IMU:** sebesség, műholdszám, HDOP, pozíció, IMU yaw/roll/pitch, BNO08x elérhetőség
+- **Kapcsolók:** kormány- és munkakapcsoló állapota
+- **Beállítások (AgOpenGPS):** LowPWM/HighPWM/MinPWM, SteerSensorCounts, WAS offset, Ackerman fix
+- **Rendszer:** szabad RAM, CPU hőmérséklet, futásidő, WiFi RSSI, csatlakozott kliensek
+
 ---
 
 ## 1. Architektúra

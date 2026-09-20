@@ -283,7 +283,10 @@ void udpSendTask(void* params) {
       // Only send if we have a connected client
       if (udpRemotePort != 0 && wifiStatus != WIFI_ERROR) {
         bool success = false;
-        if (udp.beginPacket(udpRemoteIP, 9999)) {
+        // Unicast to the IP:port the client actually sent its first packet
+        // from (learned in receiveUDP). Previously this was a hardcoded 9999,
+        // which dropped replies when the client sent from another port.
+        if (udp.beginPacket(udpRemoteIP, udpRemotePort)) {
           udp.write(packet.data, packet.length);
           success = udp.endPacket();
         }

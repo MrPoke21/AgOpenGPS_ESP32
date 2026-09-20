@@ -52,9 +52,23 @@
 #define KI_MAX_INTEGRAL   50.0f
 // ────────────────────────────────────────────────────────────────────────────
 
-// ==================== SENSOR CALIBRATION ====================    
-/** Current sensor scaling modifier (0.1 = 0.1A per ADC unit for 40W 12V motor) */
-#define CURRENT_SENSORE_MODIFIER 0.1
+// ==================== SENSOR CALIBRATION ====================
+/** Current sensor (ACS712) scaling into the 0-255 range the AoG client expects.
+ *  Original 10-bit ADC logic was: sensorReading = abs(775 - analogRead) * 0.5
+ *  The ADS1115 (GAIN_TWOTHIRDS, +/-6.144V) resolves ~26x finer counts than the
+ *  10-bit Arduino ADC, so the equivalent factor here is 0.5 / 26 = 0.0192.
+ *  The zero point (current_zero) is learned at startup, same role as the
+ *  hardcoded 775 in the original code. No voltage/ampere conversion needed. */
+#define CURRENT_SENSORE_MODIFIER 0.0192f
+
+/** Deadband in ADC counts around the zero point that is treated as "no current"
+ *  (suppresses ACS712 noise, prevents false kickout while the motor is idle) */
+#define CURRENT_DEADBAND_COUNTS 40
+
+/** Auto-zero: current_zero is re-learned (slow EMA, 1% per sample) whenever the
+ *  scaled reading is below this value (0-255 units) and autosteer is OFF */
+#define CURRENT_AUTOZERO_MAX 10.0f
+
 
 // ==================== ADC CONFIGURATION ====================
 

@@ -29,6 +29,15 @@
 extern int16_t steeringPosition;               // from steering sensor
 extern bool adcConnected;
 
+// ADC cache values shared with the web telemetry (/status endpoint).
+// Raw samples and median/EMA-filtered values are written by the background
+// ADC task; current_zero is the auto-learned zero point of the current sensor.
+extern int16_t cachedSteeringSensor;
+extern int16_t cachedCurrentSensor;
+extern int16_t filteredSteeringSensor;
+extern int16_t filteredCurrentSensor;
+extern int16_t current_zero;
+
 void calcSteerAngle();
 void inputHandler();
 void initInput();

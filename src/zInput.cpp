@@ -110,13 +110,33 @@ void inputHandler() {
     }
   }
 
-  // Current sensor?
+  // Current sensor? (ACS712) - the client expects a 0-255 value, same as the
+  // original AoG firmware. No voltage/ampere conversion, just offset + scale.
   if (steerConfig.CurrentSensor) {
-    // Sensor value already EMA-filtered in ADC task, just offset and scale
-    sensorReading = abs((float)sensor - current_zero) * CURRENT_SENSORE_MODIFIER;
-    sensorReading = constrain(sensorReading, 0, 255);
-    if (sensorReading >= steerConfig.PulseCountMax) {
-      steerSwitch = 1; // reset values like it turned off
+    // Absolute deviation from the learned zero point
+    // (original 10-bit logic: abs(775 - analogRead))
+    float deltaCounts = (float)sensor - (float)current_zero;
+    float sensorSample = fabsf(deltaCounts) * CURRENT_SENSORE_MODIFIER;
+
+    // Deadband: noise around the zero point reads as 0
+    if (fabsf(deltaCounts) < CURRENT_DEADBAND_COUNTS) {
+      sensorSample = 0.0f;
+    }
+
+    // Auto-zero: re-learn the zero point while the motor is idle
+    // (only when autosteer is OFF so motor current can't corrupt it)
+    if (sensorSample < CURRENT_AUTOZERO_MAX && steerSwitch == 1) {
+      current_zero += (int16_t)(((float)sensor - (float)current_zero) * 0.01f);
+    }
+
+    // Same smoothing as the original firmware: 70% previous + 30% new
+    sensorReading = sensorReading * 0.7f + sensorSample * 0.3f;
+    sensorReading = constrain(sensorReading, 0.0f, 255.0f);
+
+    if (sensorReading >= (float)steerConfig.PulseCountMax) {
+      steerSwitch = 1;  // kickout - reset values like the switch was turned off
+      // (the button toggle state re-syncs itself via steerEnable in
+      // readInputSwitches(), so no currentState/previous reset is needed here)
     }
   }
 }

@@ -21,6 +21,9 @@ static float    learnedKd   = 0.0f;
 static bool     kdDirty     = false;
 static uint32_t lastKdSave  = 0;
 static float    lastError   = 0.0f;
+// I-term accumulator - lives at file scope so the web telemetry (/status)
+// can report the live I output between PID ticks
+static float    integralError = 0.0f;
 
 // Circular buffer for zero-crossing detection (KD_TUNE_WINDOW samples)
 static float   errorHistory[KD_TUNE_WINDOW] = {};
@@ -84,6 +87,10 @@ static void autoTuneStep(float error) {
     saveAutoTuneKd();
   }
 }
+
+// ── Telemetry getters (web UI Telemetria tab / /status endpoint) ──────────────
+float getLearnedKd(void)    { return learnedKd; }
+float getIntegralError(void) { return integralError; }
 #endif // USE_AUTOTUNE_PID
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -118,8 +125,6 @@ void calcSteeringPID(void) {
 
 #ifdef USE_AUTOTUNE_PID
   // ── Teljes PID (P+I+D) + öntanuló D tag ────────────────────────────────────
-  static float integralError = 0.0f;
-
   // P tag
   pValue = steerSettings.Kp * steerAngleError;
 
