@@ -15,10 +15,10 @@ void readInputSwitches() {
   // read all the switches
   workSwitch = !gpio_get_level((gpio_num_t)WORKSW_PIN);
 
-  if (steerConfig.SteerSwitch == 1) // steer switch on - off
+  if (steerConfig.steerSwitch) // steer switch on - off
   {
     steerSwitch = gpio_get_level((gpio_num_t)STEERSW_PIN); // read auto steer enable switch (inverted: 1 when shorted to GND)
-  } else if (steerConfig.SteerButton == 1) // steer Button momentary
+  } else if (steerConfig.steerButton) // steer Button momentary
   {
     // Detect steerEnable state change from external sources
     static uint8_t lastSteerEnable = 0;

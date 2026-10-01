@@ -167,7 +167,7 @@ Ez a modul kapta a legtöbb egyedi fejlesztést ebben a firmware-ben:
 ## 9. Konfiguráció és EEPROM
 
 - Minden hangolható konstans egy helyen: [include/Configuration.h](include/Configuration.h).
-- 96 bájtos EEPROM elrendezés: azonosító, `Storage` (PID/steer beállítások), `Setup` (funkció-jelzők), IP-cím, és opcionálisan az auto-tune Kd érték.
+- 96 bájtos EEPROM elrendezés: azonosító, `SteerSettingsData` (PID/steer beállítások, PGN 252 payload), `SteerConfigData` (funkció-jelzők, PGN 251 payload), IP-cím, és opcionálisan az auto-tune Kd érték.
 - WiFi/UDP mód (AP vagy STA), teljesítmény és sávszélesség finomhangolása is itt konfigurálható.
 
 ---

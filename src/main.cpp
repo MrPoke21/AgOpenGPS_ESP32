@@ -59,8 +59,8 @@ int16_t helloSteerPosition = 0;
 uint8_t pwmDisplay = 0;
 
 NmeaPGN nmeaData = NmeaPGN();
-Setup steerConfig = Setup();
-Storage steerSettings = Storage(); 
+SteerConfigData steerConfig;
+SteerSettingsData steerSettings;
 
 void autosteerSetup() {
 
@@ -90,7 +90,7 @@ void autosteerSetup() {
     EEPROM.get(40, steerConfig);
     EEPROM.get(60, ipArray);
   }
-  highLowPerDeg = ((float)(steerSettings.highPWM - steerSettings.lowPWM)) / LOW_HIGH_DEGREES;
+  highLowPerDeg = ((float)(steerSettings.highPwm - steerSettings.lowPwm)) / LOW_HIGH_DEGREES;
 #ifdef USE_AUTOTUNE_PID
   loadAutoTuneKd();  // Öntanult Kd betöltése EEPROM-ból
 #endif

@@ -119,7 +119,7 @@ static void handleStatus() {
   j.reserve(1400);
 
   // ── AUTOTUNE / PID (first - the tuning-relevant values) ─────────────────────
-  j = "{\"kp\":" + String(steerSettings.Kp);
+  j = "{\"kp\":" + String(steerSettings.gainP);
 #ifdef USE_AUTOTUNE_PID
   j += ",\"kd\":" + String(getLearnedKd(), 1);
   j += ",\"ki\":" + String(KI_GAIN, 1);
@@ -166,12 +166,12 @@ static void handleStatus() {
   j += ",\"work\":" + String(workSwitch);
 
   // ── AgOpenGPS-provided steering settings (context for the PID values) ──────
-  j += ",\"lowpwm\":" + String(steerSettings.lowPWM);
-  j += ",\"highpwm\":" + String(steerSettings.highPWM);
-  j += ",\"minpwm\":" + String(steerSettings.minPWM);
-  j += ",\"scount\":" + String(steerSettings.steerSensorCounts, 1);
+  j += ",\"lowpwm\":" + String(steerSettings.lowPwm);
+  j += ",\"highpwm\":" + String(steerSettings.highPwm);
+  j += ",\"minpwm\":" + String(steerSettings.minPwm);
+  j += ",\"scount\":" + String((float)steerSettings.countsPerDegree, 1);
   j += ",\"woff\":" + String(steerSettings.wasOffset);
-  j += ",\"ack\":" + String(steerSettings.AckermanFix, 2);
+  j += ",\"ack\":" + String(steerSettings.ackermannX100 * 0.01f, 2);
 
   // ── System / WiFi health ───────────────────────────────────────────────────
   j += ",\"mode\":\"" + String(wifiRuntimeConfig.mode == 1 ? "AP" : "Kliens") + "\"";

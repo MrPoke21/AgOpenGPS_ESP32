@@ -126,7 +126,7 @@ void calcSteeringPID(void) {
 #ifdef USE_AUTOTUNE_PID
   // ── Teljes PID (P+I+D) + öntanuló D tag ────────────────────────────────────
   // P tag
-  pValue = steerSettings.Kp * steerAngleError;
+  pValue = steerSettings.gainP * steerAngleError;
 
   // I tag – steady-state hiba megszüntetése (anti-windup clamp)
   integralError = constrain(integralError + steerAngleError, -KI_MAX_INTEGRAL, KI_MAX_INTEGRAL);
@@ -142,7 +142,7 @@ void calcSteeringPID(void) {
 #else
   // ── Eredeti P-only logika ──────────────────────────────────────────────────
   // P szabályozó
-  pValue = steerSettings.Kp * steerAngleError;
+  pValue = steerSettings.gainP * steerAngleError;
   pwmDrive = (int16_t)pValue;
 
 #endif // USE_AUTOTUNE_PID
@@ -150,23 +150,23 @@ void calcSteeringPID(void) {
   // PWM maximum kiszámítása
   int16_t newMax = 0;
   if (errorAbs < LOW_HIGH_DEGREES) {
-    newMax = (errorAbs * highLowPerDeg) + steerSettings.lowPWM;
+    newMax = (errorAbs * highLowPerDeg) + steerSettings.lowPwm;
   } else {
-    newMax = steerSettings.highPWM;
+    newMax = steerSettings.highPwm;
   }
 
   // HOLTSÁV KOMPENZÁCIÓ (motor indítás)
   if (pwmDrive > 0) {
-    pwmDrive += steerSettings.minPWM;
+    pwmDrive += steerSettings.minPwm;
   } else if (pwmDrive < 0) {
-    pwmDrive -= steerSettings.minPWM;
+    pwmDrive -= steerSettings.minPwm;
   }
 
   // Limitálás ELŐBB – hogy a ramp referencia helyes legyen
   if (pwmDrive > newMax) pwmDrive = newMax;
   if (pwmDrive < -newMax) pwmDrive = -newMax;
 
-  if (steerConfig.MotorDriveDirection) pwmDrive *= -1;
+  if (steerConfig.motorDriveDirection) pwmDrive *= -1;
 
   motorDrive();
 }
@@ -186,7 +186,7 @@ void motorDrive(void) {
   pwmDisplay = abs(pwmDrive); // Update display variable with absolute PWM value
   int16_t scaledPWM = pwmDrive * 4;  // Scale from 8-bit to 10-bit range
   
-  if (steerConfig.CytronDriver) {
+  if (steerConfig.cytronDriver) {
     // Cytron MD30C Driver Dir + PWM Signal
     if (pwmDrive >= 0) {
       ledcWrite(PWM_CHANNEL_LPWM, 1023);  // Full scale for 10-bit

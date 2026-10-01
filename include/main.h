@@ -3,6 +3,7 @@
 
 #include <EEPROM.h>
 #include "CyclicTimer.h"
+#include <PgnBuilder.h>
 
 /*  PWM Frequency ->
      490hz (default) = 0
@@ -14,7 +15,9 @@
 /////////////////////////////////////////////
 
 // if not in eeprom, overwrite
-#define EEP_Ident 2500
+// 2501: bumped for the PgnBuilder settings migration - the SteerSettingsData /
+// SteerConfigData EEPROM layout changed, old stored bytes would decode as garbage
+#define EEP_Ident 2501
 
 //   ***********  Motor drive connections  **************888
 //Connect ground only for cytron, Connect Ground and +5v for IBT2
@@ -97,35 +100,10 @@ extern int16_t helloSteerPosition;
 extern uint8_t pwmDisplay;
 extern uint32_t lastFEPacketTime;
 
-//Variables for settings
-struct Storage {
-  uint8_t Kp = 40;      // proportional gain
-  uint8_t lowPWM = 10;  // band of no action
-  int16_t wasOffset = 0;
-  uint8_t minPWM = 9;
-  uint8_t highPWM = 60;  // max PWM value
-  float steerSensorCounts = 30;
-  float AckermanFix = 1;  // sent as percent
-};
-extern Storage steerSettings;  // 11 bytes
-
-//Variables for settings - 0 is false
-struct Setup {
-  uint8_t InvertWAS = 0;
-  uint8_t IsRelayActiveHigh = 0;  // if zero, active low (default)
-  uint8_t MotorDriveDirection = 0;
-  uint8_t SingleInputWAS = 1;
-  uint8_t CytronDriver = 1;
-  uint8_t SteerSwitch = 0;  // 1 if switch selected
-  uint8_t SteerButton = 0;  // 1 if button selected
-  uint8_t ShaftEncoder = 0;
-  uint8_t PressureSensor = 0;
-  uint8_t CurrentSensor = 0;
-  uint8_t PulseCountMax = 5;
-  uint8_t IsDanfoss = 0;
-  uint8_t IsUseY_Axis = 0;  //Set to 0 to use X Axis, 1 to use Y avis
-};
-extern Setup steerConfig;  // 9 bytes
+//Variables for settings - the runtime globals ARE the parsed PGN payloads
+// (PGN 252 -> SteerSettingsData, PGN 251 -> SteerConfigData; see PgnBuilder.h)
+extern SteerSettingsData steerSettings;
+extern SteerConfigData steerConfig;
 
 class NmeaPGN {
 public:

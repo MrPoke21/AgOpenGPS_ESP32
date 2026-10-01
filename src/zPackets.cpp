@@ -6,6 +6,7 @@
 #include <zWebConfig.h>
 #include <main.h>
 #include <AutosteerPID.h>
+#include <PgnBuilder.h>
 #ifdef SPEED_IMPULSE_ENABLED
   #include <zSpeedImpulse.h>
 #endif
@@ -24,19 +25,6 @@ byte packetBuffer[MAX_PACKET_SIZE];
 int stateIndex = 0;
 int totalHeaderByteCount = 5;
 int count;
-//Heart beat hello AgIO
-byte helloFromIMU[] = { 128, 129, 121, 121, 5, 0, 0, 0, 0, 0, 71 };
-byte helloFromAutoSteer[] = { 0x80, 0x81, 126, 126, 5, 0, 0, 0, 0, 0, 71 };
-
-//fromAutoSteerData FD 253 - ActualSteerAngle*100 -5,6, SwitchByte-7, pwmDisplay-8
-byte PGN_253[] = { 0x80, 0x81, 126, 0xFD, 8, 0, 0, 0x0F, 0x27, 0xB8, 0x22, 0, 0, 0xCC };
-
-//fromAutoSteerData FA 250 - sensor values etc
-byte PGN_250[] = { 0x80, 0x81, 126, 0xFA, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0xCC };
-
-//Scan reply
-byte scanReply[] = { 128, 129, 126, 203, 7, 0, 0, 0, 0, 0, 0, 0, 23 };
-
 
 
 void autoSteerPacketPerser(void *pvParameters) {
@@ -161,16 +149,9 @@ void parsePacket(byte* packet, int size) {
       return;
     }
 
-    int CK_A = 0;
-    for (int j = 2; j < length - 1; j++) {
-      CK_A += packet[j];
-    }
-
-    if (packet[length - 1] != (byte)CK_A) {
-      DEBUG_PRINT("ERROR: Checksum mismatch. Expected: 0x");
-      DEBUG_PRINT((byte)CK_A, HEX);
-      DEBUG_PRINT(" Got: 0x");
-      DEBUG_PRINTLN(packet[length - 1], HEX);
+    // Checksum verification via PgnBuilder (sum of bytes 2..length-2)
+    if (!PgnBuilder::ValidateChecksum(packet, (size_t)length)) {
+      DEBUG_PRINTLN("ERROR: Checksum mismatch");
       printLnByteArray(packet, size);
       return;
     }
@@ -187,17 +168,23 @@ void parsePacket(byte* packet, int size) {
           if (packetLength < 13) {
             break;
           }
-          
-          gpsSpeed = ((float)(packet[5] | packet[6] << 8)) * 0.1;
+
+          // Parse the incoming AutoSteer Data (PGN 254) via PgnBuilder
+          AutoSteerData steerData;
+          if (!PgnBuilder::TryParseAutoSteerData(packet, (size_t)packetLength, steerData)) {
+            break;
+          }
+
+          gpsSpeed = ((float)steerData.speedX10) * 0.1;
           #ifdef SPEED_IMPULSE_ENABLED
             setSpeedKmh(gpsSpeed);
           #endif
           prevGuidanceStatus = guidanceStatus;
-          guidanceStatus = packet[7];
+          guidanceStatus = steerData.status;
           guidanceStatusChanged = (guidanceStatus != prevGuidanceStatus);
 
           //Bit 8,9    set point steer angle * 100 is sent
-          steerAngleSetPoint = ((float)(packet[8] | ((int8_t)packet[9]) << 8)) * 0.01;  //high low bytes
+          steerAngleSetPoint = ((float)steerData.steerAngleX100) * 0.01;  //high low bytes
 
           byte guidanceBit = bitRead(guidanceStatus, 0);
           
@@ -208,32 +195,30 @@ void parsePacket(byte* packet, int size) {
             prevSteerEnableCondition = steerEnable;
           }
           
-          //Bit 10 Tram
-          tram = packet[10];
-          //Bit 11
-          relay = packet[11];
-          //Bit 12
-          relayHi = packet[12];
+          //Bit 10 Tram / cross-track error
+          tram = (uint8_t)steerData.xte;
+          //Bit 11: section bits 1-8 (classic: relay)
+          relay = (uint8_t)(steerData.sections & 0xFF);
+          //Bit 12: section bits 9-16 (classic: relayHi)
+          relayHi = (uint8_t)(steerData.sections >> 8);
           //----------------------------------------------------------------------------
           //Serial Send to agopenGPS
-
-          int16_t sa = (int16_t)(steerAngleActual * 100);
-
-          PGN_253[5] = (uint8_t)sa;
-          PGN_253[6] = sa >> 8;
-
-          PGN_253[11] = switchByte;
-          PGN_253[12] = (uint8_t)pwmDisplay;
-
-          sendData(PGN_253, sizeof(PGN_253));
+          // Reply with the current steer state (PGN 253, CRC computed by the builder).
+          // Heading/roll keep the placeholder values of the classic firmware
+          // (999.9 deg / 888.8 deg) until real IMU values are wired in.
+          sendData(PgnBuilder::BuildSteerDataPgn(
+                       (int16_t)(steerAngleActual * 100),
+                       PgnBuilder::PLACEHOLDER_HEADING_X10,
+                       PgnBuilder::PLACEHOLDER_ROLL_X10,
+                       switchByte, pwmDisplay),
+                   PgnBuilder::STEER_DATA_PGN_SIZE);
 
           //Steer Data 2 -------------------------------------------------
-          if (steerConfig.PressureSensor || steerConfig.CurrentSensor) {
+          if (steerConfig.pressureSensor || steerConfig.currentSensor) {
             if (aog2Count++ > 2) {
-              //Send fromAutosteer2
-              PGN_250[5] = (byte)sensorReading;
-
-              sendData(PGN_250, sizeof(PGN_250));
+              //Send fromAutosteer2 (PGN 250)
+              sendData(PgnBuilder::BuildSensorDataPgn((uint8_t)sensorReading),
+                       PgnBuilder::SENSOR_DATA_PGN_SIZE);
               aog2Count = 0;
             }
           }
@@ -242,17 +227,14 @@ void parsePacket(byte* packet, int size) {
       //steer settings
       case 252:
         {  //0xFC
-          //PID values
-          steerSettings.Kp = (float)packet[5]*1.0;    // read Kp from AgOpenGPS
-          steerSettings.highPWM = packet[6];         // read high pwm
-          steerSettings.lowPWM = (float)packet[7];  // read lowPWM from AgOpenGPS
-          steerSettings.minPWM = packet[8];         //read the minimum amount of PWM for instant on
-          float temp = (float)steerSettings.minPWM * 1.0;
-          steerSettings.lowPWM = (byte)temp;
-          steerSettings.steerSensorCounts = packet[9];   //sent as setting displayed in AOG
-          steerSettings.wasOffset = (packet[10]);        //read was zero offset Lo
-          steerSettings.wasOffset |= (packet[11] << 8);  //read was zero offset Hi
-          steerSettings.AckermanFix = (float)packet[12] * 0.01;
+          // Parse the incoming Steer Settings (PGN 252) directly into the
+          // runtime settings struct (steerSettings IS the parsed payload)
+          if (!PgnBuilder::TryParseSteerSettings(packet, (size_t)packetLength, steerSettings)) {
+            break;
+          }
+
+          // NOTE: kept from the original parser - lowPWM ends up as minPWM
+          steerSettings.lowPwm = steerSettings.minPwm;
 
           //crc
           //autoSteerUdpData[13];
@@ -261,45 +243,16 @@ void parsePacket(byte* packet, int size) {
           EEPROM.put(10, steerSettings);
           EEPROM.commit();
           // for PWM High to Low interpolator
-          highLowPerDeg = ((float)(steerSettings.highPWM - steerSettings.lowPWM)) / LOW_HIGH_DEGREES;
+          highLowPerDeg = ((float)(steerSettings.highPwm - steerSettings.lowPwm)) / LOW_HIGH_DEGREES;
           break;
         }
       case 251:  //251 FB - SteerConfig
         {
-          uint8_t sett = packet[5];  //setting0
-
-          if (bitRead(sett, 0)) steerConfig.InvertWAS = 1;
-          else steerConfig.InvertWAS = 0;
-          if (bitRead(sett, 1)) steerConfig.IsRelayActiveHigh = 1;
-          else steerConfig.IsRelayActiveHigh = 0;
-          if (bitRead(sett, 2)) steerConfig.MotorDriveDirection = 1;
-          else steerConfig.MotorDriveDirection = 0;
-          if (bitRead(sett, 3)) steerConfig.SingleInputWAS = 1;
-          else steerConfig.SingleInputWAS = 0;
-          if (bitRead(sett, 4)) steerConfig.CytronDriver = 1;
-          else steerConfig.CytronDriver = 0;
-          if (bitRead(sett, 5)) steerConfig.SteerSwitch = 1;
-          else steerConfig.SteerSwitch = 0;
-          if (bitRead(sett, 6)) steerConfig.SteerButton = 1;
-          else steerConfig.SteerButton = 0;
-          if (bitRead(sett, 7)) steerConfig.ShaftEncoder = 1;
-          else steerConfig.ShaftEncoder = 0;
-
-          steerConfig.PulseCountMax = packet[6];
-
-          //was speed
-          //autoSteerUdpData[7];
-
-          sett = packet[8];  //setting1 - Danfoss valve etc
-
-          if (bitRead(sett, 0)) steerConfig.IsDanfoss = 1;
-          else steerConfig.IsDanfoss = 0;
-          if (bitRead(sett, 1)) steerConfig.PressureSensor = 1;
-          else steerConfig.PressureSensor = 0;
-          if (bitRead(sett, 2)) steerConfig.CurrentSensor = 1;
-          else steerConfig.CurrentSensor = 0;
-          if (bitRead(sett, 3)) steerConfig.IsUseY_Axis = 1;
-          else steerConfig.IsUseY_Axis = 0;
+          // Parse the incoming Steer Config (PGN 251) directly into the
+          // runtime config struct (steerConfig IS the parsed payload)
+          if (!PgnBuilder::TryParseSteerConfig(packet, (size_t)packetLength, steerConfig)) {
+            break;
+          }
 
           //crc
           //autoSteerUdpData[13];
@@ -311,48 +264,48 @@ void parsePacket(byte* packet, int size) {
         }
       case 200:
         {  // Hello from AgIO
+          // Parse the incoming hello (PGN 200) via PgnBuilder
+          if (!PgnBuilder::TryParseHelloFromAgIo(packet, (size_t)packetLength)) {
+            break;
+          }
 
-          int16_t sa = (int16_t)(steerAngleActual * 100);
-
-          helloFromAutoSteer[5] = (uint8_t)sa;
-          helloFromAutoSteer[6] = sa >> 8;
-
-          helloFromAutoSteer[7] = (uint8_t)helloSteerPosition;
-          helloFromAutoSteer[8] = helloSteerPosition >> 8;
-          helloFromAutoSteer[9] = switchByte;
-
-          sendData(helloFromAutoSteer, sizeof(helloFromAutoSteer));
+          // Reply with the hello from AutoSteer (PGN 126, CRC computed by the builder)
+          sendData(PgnBuilder::BuildHelloFromAutoSteerPgn(steerAngleActual, helloSteerPosition, switchByte),
+                   PgnBuilder::HELLO_AUTO_STEER_PGN_SIZE);
 
           // Send IMU hello immediately after (no delay)
           if (useBNO08x) {
-            sendData(helloFromIMU, sizeof(helloFromIMU));
+            sendData(PgnBuilder::BuildHelloFromImuPgn(), PgnBuilder::HELLO_IMU_PGN_SIZE);
           }
           break;
         }
       case 202:
         {
-          //make really sure this is the reply pgn
-          if (packet[4] == 3 && packet[5] == 202 && packet[6] == 202) {
+          // Make really sure this is the scan request pgn (via PgnBuilder)
+          if (PgnBuilder::TryParseScanRequest(packet, (size_t)packetLength)) {
 #if ENABLE_UDP
-            // Fill scanReply with local and remote IP addresses
+            // Build scan reply with local IP and remote subnet
             IPAddress myIP;
-            
+
             // Get local IP address based on WiFi mode
             myIP = (wifiRuntimeConfig.mode == 1) ? WiFi.softAPIP() : WiFi.localIP();
-            
-            // Fill local IP bytes (5-8)
-            scanReply[5] = myIP[0];
-            scanReply[6] = myIP[1];
-            scanReply[7] = myIP[2];
-            scanReply[8] = myIP[3];
-            
-            // Fill remote IP bytes (9-11 - first 3 octets)
-            scanReply[9] = udpRemoteIP[0];
-            scanReply[10] = udpRemoteIP[1];
-            scanReply[11] = udpRemoteIP[2];
+
+            // Local IP bytes (5-8)
+            const uint8_t localIp[4] = { (uint8_t)myIP[0], (uint8_t)myIP[1],
+                                         (uint8_t)myIP[2], (uint8_t)myIP[3] };
+
+            // Remote subnet bytes (9-11 - first 3 octets)
+            const uint8_t remoteSubnet[3] = { (uint8_t)udpRemoteIP[0], (uint8_t)udpRemoteIP[1],
+                                              (uint8_t)udpRemoteIP[2] };
+
+            // PGN 203 scan reply, CRC computed by the builder
+            sendData(PgnBuilder::BuildScanReplyPgn(PgnBuilder::SOURCE_AUTO_STEER, localIp, remoteSubnet),
+                     PgnBuilder::SCAN_REPLY_PGN_SIZE);
+#else
+            // Serial-only build: no IP addresses available
+            sendData(PgnBuilder::BuildScanReplyPgn(PgnBuilder::SOURCE_AUTO_STEER, NULL, NULL),
+                     PgnBuilder::SCAN_REPLY_PGN_SIZE);
 #endif
-            
-            sendData(scanReply, sizeof(scanReply));
             DEBUG_PRINTLN("[PKT] Response sent: scanReply (0xCB)");
           }
           break;

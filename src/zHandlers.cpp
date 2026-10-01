@@ -239,7 +239,7 @@ void quaternionToEuler(float qr, float qi, float qj, float qk) {
   }
 
   ypr.yaw = atan2(2.0 * (qi * qj + qk * qr), (sqi - sqj - sqk + sqr));
-  if (steerConfig.IsUseY_Axis) {
+  if (steerConfig.isUseYAxis) {
     ypr.pitch = asin(-2.0 * (qi * qk - qj * qr) / (sqi + sqj + sqk + sqr));
     ypr.roll = atan2(2.0 * (qj * qk + qi * qr), (-sqi - sqj + sqk + sqr));
   } else {

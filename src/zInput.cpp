@@ -102,17 +102,17 @@ void inputHandler() {
   }
 
   // Pressure sensor?
-  if (steerConfig.PressureSensor) {
+  if (steerConfig.pressureSensor) {
     // Sensor value already EMA-filtered in ADC task, just scale it
     sensorReading = sensor * 0.25f;
-    if (sensorReading >= steerConfig.PulseCountMax) {
+    if (sensorReading >= steerConfig.pulseCountMax) {
       steerSwitch = 1; // reset values like it turned off
     }
   }
 
   // Current sensor? (ACS712) - the client expects a 0-255 value, same as the
   // original AoG firmware. No voltage/ampere conversion, just offset + scale.
-  if (steerConfig.CurrentSensor) {
+  if (steerConfig.currentSensor) {
     // Absolute deviation from the learned zero point
     // (original 10-bit logic: abs(775 - analogRead))
     float deltaCounts = (float)sensor - (float)current_zero;
@@ -133,7 +133,7 @@ void inputHandler() {
     sensorReading = sensorReading * 0.7f + sensorSample * 0.3f;
     sensorReading = constrain(sensorReading, 0.0f, 255.0f);
 
-    if (sensorReading >= (float)steerConfig.PulseCountMax) {
+    if (sensorReading >= (float)steerConfig.pulseCountMax) {
       steerSwitch = 1;  // kickout - reset values like the switch was turned off
       // (the button toggle state re-syncs itself via steerEnable in
       // readInputSwitches(), so no currentState/previous reset is needed here)
@@ -163,17 +163,17 @@ void calcSteerAngle() {
   // Convert position to steer angle
   // Sensor is pre-filtered, just apply offset and scaling
   int16_t offsetPosition;
-  if (steerConfig.InvertWAS) {
+  if (steerConfig.invertWas) {
     offsetPosition = steeringPosition - WAS_CENTER_POSITION - steerSettings.wasOffset;
-    steerAngleActual = (float)offsetPosition / -(float)steerSettings.steerSensorCounts;
+    steerAngleActual = (float)offsetPosition / -(float)steerSettings.countsPerDegree;
   } else {
     offsetPosition = steeringPosition - WAS_CENTER_POSITION + steerSettings.wasOffset;
-    steerAngleActual = (float)offsetPosition / (float)steerSettings.steerSensorCounts;
+    steerAngleActual = (float)offsetPosition / (float)steerSettings.countsPerDegree;
   }
 
   // Ackerman fix - only apply when steering left (negative angle)
   if (steerAngleActual < 0) {
-    steerAngleActual = steerAngleActual * steerSettings.AckermanFix;
+    steerAngleActual = steerAngleActual * (steerSettings.ackermannX100 * 0.01f);
   }
 }
 
