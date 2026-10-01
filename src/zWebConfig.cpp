@@ -17,6 +17,11 @@ static WebServer configServer(WEB_SERVER_PORT);
 static bool restartPending = false;
 static uint32_t restartAtMs = 0;
 
+// True, ha az AP_FORCE_PIN GND-re volt zárva induláskor - az aktuális boot
+// kényszerített AP módban fut. Az NVS-ben tárolt mód ilyenkor csak ideiglenesen
+// (erre a bootra) van felülírva, nem mentődik vissza.
+static bool apForcedByPin = false;
+
 // DEBUG ON toggle auto-disables if the browser stops sending heartbeats
 // (page closed/navigated away/connection lost) - never persisted, always starts OFF.
 static const uint32_t DEBUG_HEARTBEAT_TIMEOUT_MS = 4000;
@@ -175,6 +180,7 @@ static void handleStatus() {
 
   // ── System / WiFi health ───────────────────────────────────────────────────
   j += ",\"mode\":\"" + String(wifiRuntimeConfig.mode == 1 ? "AP" : "Kliens") + "\"";
+  j += ",\"fap\":" + String(apForcedByPin ? 1 : 0);
   j += ",\"ip\":\"" + ((wifiRuntimeConfig.mode == 1) ? WiFi.softAPIP() : WiFi.localIP()).toString() + "\"";
   j += ",\"clients\":" + String(getWiFiClientCount());
   j += ",\"rssi\":" + String((wifiRuntimeConfig.mode == 0 && WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : 0);
@@ -191,7 +197,10 @@ static void handleStatus() {
 
 static void handleRoot() {
   String statusLine;
-  if (wifiRuntimeConfig.mode == 1) {
+  if (apForcedByPin) {
+    statusLine = "AP mod KENYSZERITETT (GPIO" + String(AP_FORCE_PIN) + " GND-n) - IP: " + WiFi.softAPIP().toString() +
+                 ", csatlakozott kliensek: " + String(getWiFiClientCount());
+  } else if (wifiRuntimeConfig.mode == 1) {
     statusLine = "AP mod aktiv - IP: " + WiFi.softAPIP().toString() +
                  ", csatlakozott kliensek: " + String(getWiFiClientCount());
   } else if (getWiFiStatus() == WIFI_STA_CONNECTED) {
@@ -350,6 +359,7 @@ static void handleRoot() {
     "{s:'Beallitasok (AgOpenGPS)',k:'woff',l:'WAS offset',f:'n0'},"
     "{s:'Beallitasok (AgOpenGPS)',k:'ack',l:'Ackerman fix',f:'n2'},"
     "{s:'Rendszer',k:'mode',l:'WiFi uzemmod',f:'s'},"
+    "{s:'Rendszer',k:'fap',l:'Kenyszeritett AP mod (GPIO4 GND jumper)',f:'yn'},"
     "{s:'Rendszer',k:'ip',l:'IP cim',f:'s'},"
     "{s:'Rendszer',k:'clients',l:'Csatlakozott WiFi kliensek',f:'n0'},"
     "{s:'Rendszer',k:'rssi',l:'WiFi jeloerosseg (RSSI)',f:'rssi'},"
@@ -488,9 +498,14 @@ static void handleSave() {
 
   saveWiFiRuntimeConfig();
 
+  String savedMsg = "<p>Beallitasok mentve. Az eszkoz ujraindul...</p>";
+  if (apForcedByPin) {
+    // A mentett (pl. STA) mód nem érvényesül, míg a jumper GND-n van
+    savedMsg += "<p><b>Figyelem:</b> az AP_FORCE_PIN jelenleg GND-re zarva, a kovetkezo inditas is "
+                "kenyszeritett AP modban tortenik, a fent beallitott modtol fuggetlenul!</p>";
+  }
   configServer.send(200, "text/html; charset=utf-8",
-    "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>"
-    "<p>Beallitasok mentve. Az eszkoz ujraindul...</p></body></html>");
+    "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>" + savedMsg + "</body></html>");
 
   // Delay the restart so the HTTP response above has time to flush to the client
   restartPending = true;
@@ -499,6 +514,21 @@ static void handleSave() {
 
 bool initWiFiConfigPortal() {
   loadWiFiRuntimeConfig();
+
+  // ── Kényszerített AP mód (GND jumper az AP_FORCE_PIN-en) ───────────────────
+  // A láb belső pull-up-pal magas. Ha induláskor GND-re van zárva, az eszköz
+  // AP módban indul, függetlenül az NVS-ben tárolt üzem módtól. A felülírás
+  // csak erre a bootra él: NVS-be nem mentődik, így a jumper eltávolítása és
+  // újraindítás után a beállított mód áll vissza.
+  pinMode(AP_FORCE_PIN, INPUT_PULLUP);
+  delay(5);  // rövid idő a belső pull-up stabilizálódására
+  apForcedByPin = (digitalRead(AP_FORCE_PIN) == LOW);
+  if (apForcedByPin) {
+    wifiRuntimeConfig.mode = 1;
+    // Serial (nem DebugLog): boot közben a debug log alapból ki van kapcsolva,
+    // a DEBUG_PRINT a webes felület engedélyezéséig nem írna ki semmit.
+    Serial.println("[WIFI] AP_FORCE_PIN GND-re zarva - kenyszeritett AP mod ebben a bootban!");
+  }
 
   bool ok = initWiFi();  // starts AP or STA per wifiRuntimeConfig.mode
 

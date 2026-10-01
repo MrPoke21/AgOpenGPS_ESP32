@@ -48,6 +48,14 @@ bool initUDP();
 void rtcmReceiveTask(void* params);
 
 /**
+ * WiFi monitor task - STA reconnect watchdog (run in separate task).
+ * Keeps wifiStatus fresh and re-issues the STA connect every 30 s while the
+ * link is down (retries forever), so later drops recover automatically even
+ * for drop reasons the WiFi driver itself does not retry.
+ */
+void wifiMonitorTask(void* params);
+
+/**
  * Send data via UDP (non-blocking queue-based)
  * @param data: pointer to data buffer
  * @param length: data length

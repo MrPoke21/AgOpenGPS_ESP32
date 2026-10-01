@@ -216,7 +216,12 @@ void sendData(byte* data, uint8_t datalen) {
   DEBUG_PRINTLN("UDP");
   //Serial.write(data, datalen);
   if (!sendUDP(data, datalen)) {
-    DEBUG_PRINTLN("[SEND] ERROR: UDP queue full - packet dropped!");
+    // Throttled: fires per packet (up to 50 Hz) while the link is down
+    static uint32_t lastDropLog = 0;
+    if (millis() - lastDropLog >= 5000) {
+      lastDropLog = millis();
+      DEBUG_PRINTLN("[SEND] ERROR: UDP queue full - packet dropped!");
+    }
   }
 #else
   // Only Serial - send via queue (non-blocking)

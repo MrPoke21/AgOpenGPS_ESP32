@@ -18,6 +18,9 @@ static volatile bool udpSocketReady = false;
 // UDP send queue
 QueueHandle_t udpSendQueue = NULL;
 
+// Forward declaration - defined at the end of this file
+void wifiMonitorTask(void* params);
+
 // Creates the send queue up front so it's never NULL once any task can reach it
 void initUDPQueues() {
   if (udpSendQueue == NULL) {
@@ -69,7 +72,8 @@ bool initWiFi() {
 
   } else {
     // STA Mode - connect to existing network (higher latency)
-    DEBUG_PRINTLN("[UDP] Starting WiFi Station Mode (Higher Latency ~30-50ms)");
+    // NO TIMEOUT: the attempt retries forever until connected (no AP fallback)
+    DEBUG_PRINTLN("[UDP] Starting WiFi Station Mode (Higher Latency ~30-50ms, no timeout)");
     WiFi.mode(WIFI_STA);
 
     // Set TX power to maximum
@@ -80,42 +84,55 @@ bool initWiFi() {
     esp_wifi_set_config(WIFI_IF_STA, &conf);
     WiFi.begin(wifiRuntimeConfig.staSsid, wifiRuntimeConfig.staPass);
 
-    uint8_t attempts = 0;
     wifiStatus = WIFI_STA_CONNECTING;
 
-    while (WiFi.status() != WL_CONNECTED && attempts++ < 120) {
+    // Végtelen csatlakozási ciklus - nincs időkorlát, amíg sikerül próbálkozik.
+    // A WiFi driver disconnect eseményre magától újracsatlakozik; a ~30 mp-enkénti
+    // WiFi.begin() újrakiadás a beragadt állapotokat is kezel (pl. a hálózat
+    // eltűnt egy scan közben).
+    uint32_t connectStartMs = millis();
+    uint32_t lastBeginMs = millis();
+    uint32_t lastProgressMs = millis();
+    while (WiFi.status() != WL_CONNECTED) {
       delay(500);
+
+      if (millis() - lastBeginMs >= 30000) {
+        lastBeginMs = millis();
+        WiFi.begin(wifiRuntimeConfig.staSsid, wifiRuntimeConfig.staPass);
+        DEBUG_PRINTLN("[UDP] Still connecting - re-issuing WiFi.begin()");
+      }
+
+      // A soros monitoron is látszik (a debug log boot közben alapból ki van kapcsolva)
+      if (millis() - lastProgressMs >= 10000) {
+        lastProgressMs = millis();
+        Serial.printf("[UDP] Connecting to \"%s\"... %lu s\n",
+                      wifiRuntimeConfig.staSsid, (unsigned long)((millis() - connectStartMs) / 1000));
+      }
+
       DEBUG_PRINT(".");
     }
 
-    if (WiFi.status() == WL_CONNECTED) {
-      DEBUG_PRINTLN("\n[UDP] WiFi Connected!");
-      DEBUG_PRINT("[UDP] IP: ");
-      DEBUG_PRINTLN(WiFi.localIP());
-      wifiStatus = WIFI_STA_CONNECTED;
-      WiFi.setSleep(false);
-      esp_wifi_set_ps(WIFI_PS_NONE);
-      return true;
-    } else {
-      DEBUG_PRINTLN("\n[UDP] WiFi Connection Failed after 60 seconds!");
-      DEBUG_PRINTLN("[UDP] Falling back to Access Point mode");
+    // A ciklus csak sikeres csatlakozáskor lép ki - többé nincs timeout / AP fallback
+    DEBUG_PRINTLN("\n[UDP] WiFi Connected!");
+    DEBUG_PRINT("[UDP] IP: ");
+    DEBUG_PRINTLN(WiFi.localIP());
+    wifiStatus = WIFI_STA_CONNECTED;
+    WiFi.setSleep(false);
+    esp_wifi_set_ps(WIFI_PS_NONE);
 
-      WiFi.disconnect(true);
-      WiFi.mode(WIFI_AP);
-      WiFi.softAP(wifiRuntimeConfig.apSsid, wifiRuntimeConfig.apPass, wifiRuntimeConfig.channel);
+    // Runtime watchdog for later drops (see wifiMonitorTask) - refreshes the
+    // status and keeps reconnecting forever while the STA link is down
+    xTaskCreatePinnedToCore(
+      wifiMonitorTask,
+      "wifiMon",
+      2048,
+      NULL,
+      1,   // Low priority - monitoring only
+      NULL,
+      0    // Core 0 (WiFi stack)
+    );
 
-      WiFi.setSleep(false);
-      esp_wifi_set_ps(WIFI_PS_NONE);
-      WiFi.setTxPower((wifi_power_t)WIFI_TX_POWER);
-
-      IPAddress apIP(192, 168, 4, 1);
-      WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-
-      DEBUG_PRINT("[UDP] AP IP: ");
-      DEBUG_PRINTLN(WiFi.softAPIP());
-      wifiStatus = WIFI_AP_READY;
-      return true;
-    }
+    return true;
   }
 }
 
@@ -178,7 +195,14 @@ bool sendUDP(const uint8_t* data, uint16_t length) {
     DEBUG_PRINTF("[UDP] Data too large: %d bytes\n", length);
     return false;
   }
-  
+
+  // STA link down: drop early instead of queueing - keeps the queue clear,
+  // avoids the per-packet "queue full" error flood on Serial, and lets the
+  // WiFi monitor task handle the reconnect. (In AP mode the link is always up.)
+  if (wifiRuntimeConfig.mode == 0 && WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+
   // No client connected yet
   if (udpRemotePort == 0) {
     return false;
@@ -195,7 +219,12 @@ bool sendUDP(const uint8_t* data, uint16_t length) {
 void sendNMEA(const uint8_t* data, uint16_t length) {
 #if ENABLE_UDP
   if (!sendUDP(data, length)) {
-    DEBUG_PRINTLN("[SEND] ERROR: UDP queue full or no client");
+    // Throttled: this fires per packet (up to 50 Hz) while the link is down
+    static uint32_t lastQueueFullLog = 0;
+    if (millis() - lastQueueFullLog >= 5000) {
+      lastQueueFullLog = millis();
+      DEBUG_PRINTLN("[SEND] ERROR: UDP queue full or no client");
+    }
   }
 #else
   if (!sendSerial(data, length)) {
@@ -215,11 +244,17 @@ uint16_t receiveUDP(uint8_t* buffer, uint16_t maxLen) {
     vTaskDelay(pdMS_TO_TICKS(1));  // yield while polling for the next datagram
   }
 
-  // Save sender info for responses (first connection only)
-  if (udpRemotePort == 0) {
-    udpRemoteIP = udp.remoteIP();
-    udpRemotePort = udp.remotePort();
-    DEBUG_PRINTF("[UDP] First packet from %s:%d\n", udpRemoteIP.toString().c_str(), udpRemotePort);
+  // Learn the client IP:port for the replies. Update it whenever the sender
+  // changes: after a WiFi outage (the ESP can get a new IP) or an AgOpenGPS
+  // restart (new source port) the previously learned address would be stale
+  // and every reply would be silently lost. Only one AgOpenGPS client is
+  // expected on this port, so "last sender wins" is safe here.
+  IPAddress senderIP = udp.remoteIP();
+  uint16_t senderPort = udp.remotePort();
+  if (udpRemotePort == 0 || senderIP != udpRemoteIP || senderPort != udpRemotePort) {
+    udpRemoteIP = senderIP;
+    udpRemotePort = senderPort;
+    DEBUG_PRINTF("[UDP] Client: %s:%d\n", udpRemoteIP.toString().c_str(), udpRemotePort);
   }
 
   int len = udp.read(buffer, maxLen);
@@ -276,22 +311,33 @@ void printWiFiStatus() {
 // ===== UDP SEND TASK (Background) =====
 void udpSendTask(void* params) {
   UDPPacket packet;
-  
+  static uint32_t lastFailLogMs = 0;  // throttle: max one failure log / 5 s
+
   while (1) {
     // Wait for packet in queue (1000ms timeout)
     if (xQueueReceive(udpSendQueue, &packet, pdMS_TO_TICKS(1000))) {
+      // While the STA link is down, DISCARD the queued packets instead of
+      // hammering lwIP: every failed sendto would print a lwIP error on Serial
+      // (up to 50 packets/s), flooding the UART and stalling high-priority
+      // tasks. Stale state is worthless for AgOpenGPS anyway - the first
+      // packet after recovery carries fresh data.
+      if (wifiRuntimeConfig.mode == 0 && WiFi.status() != WL_CONNECTED) {
+        continue;
+      }
       // Only send if we have a connected client
       if (udpRemotePort != 0 && wifiStatus != WIFI_ERROR) {
         bool success = false;
-        // Unicast to the IP:port the client actually sent its first packet
-        // from (learned in receiveUDP). Previously this was a hardcoded 9999,
-        // which dropped replies when the client sent from another port.
+        // Unicast to the IP:port the client last sent a packet from
+        // (re-learned in receiveUDP on every source change). Previously this
+        // was a hardcoded 9999, which dropped replies when the client sent
+        // from another port.
         if (udp.beginPacket(udpRemoteIP, udpRemotePort)) {
           udp.write(packet.data, packet.length);
           success = udp.endPacket();
         }
-        if (!success) {
-          DEBUG_PRINTF("[UDP] ERROR: Failed to send %d bytes to %s:%d\n", 
+        if (!success && millis() - lastFailLogMs >= 5000) {
+          lastFailLogMs = millis();
+          DEBUG_PRINTF("[UDP] ERROR: Failed to send %d bytes to %s:%d\n",
                        packet.length, udpRemoteIP.toString().c_str(), udpRemotePort);
         }
       }
@@ -329,5 +375,44 @@ void rtcmReceiveTask(void* params) {
     } else {
       vTaskDelay(pdMS_TO_TICKS(1));
     }
+  }
+}
+
+// ===== WIFI MONITOR TASK (STA reconnect watchdog, Core 0) =====
+// The WiFi driver auto-reconnects on most drop reasons (_autoReconnect is
+// true by default), but not on all of them (e.g. authentication failures).
+// This task keeps the connection state fresh for the rest of the firmware
+// and re-issues the connect every 30 s while down - STA mode retries forever,
+// there is no timeout and no automatic AP fallback.
+void wifiMonitorTask(void* params) {
+  bool wasConnected = false;
+  uint32_t lastRetryMs = 0;
+
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    if (wifiRuntimeConfig.mode != 0) {
+      continue;  // AP mode - the link is ours, nothing to monitor
+    }
+
+    bool connected = (WiFi.status() == WL_CONNECTED);
+
+    if (connected && !wasConnected) {
+      wifiStatus = WIFI_STA_CONNECTED;
+      Serial.printf("[WIFI] STA %s, IP: %s\n",
+                    wasConnected ? "ujracsatlakozott" : "csatlakozva",
+                    WiFi.localIP().toString().c_str());
+      DEBUG_PRINTF("[WIFI] STA (re)connected, IP: %s\n", WiFi.localIP().toString().c_str());
+    } else if (!connected) {
+      wifiStatus = WIFI_STA_CONNECTING;
+      if (millis() - lastRetryMs >= 30000) {
+        lastRetryMs = millis();
+        WiFi.reconnect();
+        Serial.println("[WIFI] STA kapcsolat nincs meg - ujracsatlakozas...");
+        DEBUG_PRINTLN("[WIFI] STA down - reconnect issued");
+      }
+    }
+
+    wasConnected = connected;
   }
 }

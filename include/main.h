@@ -40,6 +40,13 @@
 #define STEERSW_PIN 25
 #define WORKSW_PIN 26
 
+//------------------------ Forced AP mode jumper -----------------------
+// Induláskor a belső pull-up HIGH-ra húzza; ha a láb GND-re van zárva
+// (jumper/kapcsoló), az eszköz AP módban indul, függetlenül az NVS-ben
+// tárolt WiFi üzemmódtól (a felülírás csak az adott bootra él).
+// GPIO4: a nyákon (SCH_ESP32_AG_2025-02-10) bekötetlen, szabad láb.
+#define AP_FORCE_PIN 4
+
 #define CONST_180_DIVIDED_BY_PI 57.2957795130823
 
 //Define sensor pin for current or pressure sensor

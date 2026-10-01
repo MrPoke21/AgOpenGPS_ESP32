@@ -13,7 +13,7 @@ Az ESP32 kétféleképpen csatlakozhat a WiFi hálózathoz:
 - **AP mód (ajánlott első beállításhoz):** az ESP32 saját WiFi hálózatot hoz létre `AGOPEN_ESP32_AP` néven. Csatlakozz ehhez a hálózathoz a `12345678` jelszóval, majd nyisd meg a `http://192.168.4.1/` címet.
 - **STA mód:** az ESP32 a meglévő helyi WiFi hálózathoz csatlakozik. Ehhez a WiFi nevét és jelszavát a webes konfigurációs oldalon kell megadni.
 
-Ha STA módban az ESP32 **60 másodpercen belül nem tud csatlakozni**, automatikusan visszavált AP módba. Ilyenkor az AP hálózat az ESP32-ben beállított AP névvel és jelszóval jelenik meg, és a készülék ismét a `192.168.4.1` címen érhető el.
+STA módban a csatlakozási kísérlet **nincs időkorláthoz kötve**: az ESP32 végtelen ideig próbálkozik, amíg a kapcsolat létre nem jön (30 másodpercenként újra elindítja a kapcsolódási kísérletet). Automatikus AP-módba váltás nincs – ha közben sürgősen AP módra van szükség, a `GPIO4` (`AP_FORCE_PIN`) GND-re zárásával és újraindítással indítható.
 
 A webes konfigurációs oldal használatával beállítható az AP/STA mód, a WiFi név és jelszó, az AP csatornája, valamint az AgOpenGPS UDP portja. Az AgOpenGPS adatkommunikáció alapértelmezett portja `8888`, az RTCM korrekciós adatok fogadására szolgáló port pedig `2233`. A beállítások mentés után újraindításkor is megmaradnak.
 
@@ -107,8 +107,12 @@ Az AP és STA SSID/jelszó, az üzemmód, az AP csatornája és az AgOpenGPS UDP
 ### AP és STA mód működése
 
 - **AP mód**: az ESP32 saját WiFi hálózatot hoz létre. Ez általában a legalacsonyabb késleltetésű működés, és a készülék az `192.168.4.1` címen érhető el.
-- **STA mód**: az ESP32 a beállított külső WiFi hálózathoz csatlakozik. A csatlakozási kísérlet legfeljebb **60 másodpercig** tart.
-- **Automatikus fallback**: ha a STA kapcsolat 60 másodpercen belül nem jön létre, a firmware automatikusan AP módba vált. Ilyenkor az AP SSID-jét, jelszavát és csatornáját használja, és továbbra is a `192.168.4.1` címen érhető el.
+- **STA mód**: az ESP32 a beállított külső WiFi hálózathoz csatlakozik. A csatlakozási kísérlet **nincs időkorlátozva** – addig próbálkozik, amíg sikerül (~30 másodpercenként újraindítja a kapcsolódási kísérletet), és közben 10 másodpercenként állapotot ír a soros monitorra (`[UDP] Connecting to "SSID"... N s`).
+- **Nincs automatikus AP fallback**: a STA kapcsolódáshoz nincs időkorlát, a firmware nem vált vissza automatikusan AP módba. **Fontos:** amíg a STA csatlakozás nem jön létre, a webes felület és az UDP kommunikáció sem indul el (a kapcsolódás a `setup()`-ban blokkol). Ha a STA hálózat nem érhető el, és AP módra van szükség, zárjuk GND-re a `GPIO4` (`AP_FORCE_PIN`) lábat, és indítsuk újra a készüléket.
+- **Szakadáskezelés (futásidejű)**: a boot után egy külön `wifiMonitor` task 2 másodpercenként figyeli a STA kapcsolatot. Megszakadásnál frissíti a `wifiStatus` állapotot (a webes telemetria mindig a valós állapotot mutatja), és **30 másodpercenként újra elindítja a kapcsolódást** – a firmware végtelen ideig próbálkozik. A WiFi driver saját auto-reconnectje is aktív, amely a tipikus szakadási okokat (AP újraindítás, beacon timeout, jeltompulás stb.) magától kezeli.
+- **Küldés szakadás alatt**: amíg a STA kapcsolat nincs meg, a kimenő UDP csomagok eldobódnak – a küldő sor nem telik meg, és nem keletkezik lwIP hibaüzenet-cső a Soros porton (az blokkolhatná az időkritikus taskokat). A hibanapló bejegyzések legfeljebb 5 másodpercenként egyszer jelennek meg. Újracsatlakozás után a kommunikáció az első bejövő AgOpenGPS csomagtól folytatódik – a kliens IP:port párosa minden forrásváltozásnál automatikusan újra tanulásra kerül (AgOpenGPS/AgIO újraindítást és új DHCP-címet is eltűr).
+- **Internet-szakadás**: az ESP32 maga **nem használ internetet** (nincs benne DNS, NTP vagy TCP kliens; az NTRIP kapcsolatot a PC-n futó AgOpenGPS/AgIO tartja). Internet-kimaradáskor ezért a board nem fut hibába: csak az RTCM korrekciós adatforgalom szünetel (a GPS fix romolhat DGPS-re), és ha az AgIO csomagok is elmaradnak, az autokormány az 1 másodperces csomag-időtúllépéssel biztonságosan kikapcsol. Amint a hálózat visszaáll, a kommunikáció magától folytatódik.
+- **Kényszerített AP mód (jumper)**: az [include/main.h](include/main.h) fájlban definiált `AP_FORCE_PIN` (`GPIO4`, a nyákon szabadon maradt láb) belső pull-up-pal magas. Ha induláskor ez a láb **GND-re van zárva** (jumper vagy kapcsoló), a készülék **AP módban indul**, akkor is, ha a webes felületen STA mód volt elmentve. A felülírás csak az adott bootra él – NVS-be nem mentődik, így a jumper eltávolítása és újraindítás után a korábban beállított mód áll vissza. A kényszerített állapot a soros porton (`[WIFI] AP_FORCE_PIN GND-re zarva...`) és a webes felületen is jelezve van.
 
 A WiFi energiatakarékos módja ki van kapcsolva az alacsonyabb kommunikációs késleltetés érdekében. A TX teljesítmény és a WiFi RX/TX pufferek értékei szintén az [include/Configuration.h](include/Configuration.h) fájlban állíthatók.
 
@@ -163,8 +167,54 @@ Ez a modul kapta a legtöbb egyedi fejlesztést ebben a firmware-ben:
 
 - `SPEED_IMPULSE_ENABLED` esetén egy dedikált ESP32 hardver-timer (1 MHz órajel, megszakítás-alapú tűlevél) állít elő négyszögjelet a GPS-sebességből, konfigurálható impulzus/méter (`PULSES_PER_METER`) értékkel.
 - Ez pontosabb és processzor-terhelés szempontjából olcsóbb megoldás, mint a Teensy `tone()`-alapú, blokkoló-jellegű implementációja.
+- **Figyelem:** az `IMPULSE_PIN` alapbeállítása (GPIO25) ütközik a `STEERSW_PIN`-nel (GPIO25) – lásd a 9. fejezet (Lábkiosztás) „Ismert ütközés" pontját; a kimenet jelenleg nem működőképes.
 
-## 9. Konfiguráció és EEPROM
+## 9. Lábkiosztás (GPIO)
+
+A táblázatok a nyák (SCH_ESP32_AG_2025-02-10) tényleges bekötését és a firmware pin-konstansait foglalják össze. A pin-konstansok az [include/main.h](include/main.h) és az [include/Configuration.h](include/Configuration.h) fájlokban vannak definiálva.
+
+### Foglalt lábak
+
+| GPIO | Nyák / jel | Funkció | Firmware konstans | Megjegyzés |
+|---|---|---|---|---|
+| GPIO1 (TX0) | – | USB soros (debug konzol) | `Serial` | modul belső USB-UART |
+| GPIO3 (RX0) | – | USB soros (debug konzol) | `Serial` | modul belső USB-UART |
+| GPIO12 | LPWM | Motor LPWM (IBT-2 bal / Cytron PWM) | `PWM1_LPWM` (main.h) | **strap-láb (MTDI): boot közben soha ne húzzuk GND-re** – 1,8 V-os flash tápfeszültséget választana és az eszköz nem indul el |
+| GPIO14 | RPWM | Motor RPWM (IBT-2 jobb / Cytron PWM) | `PWM2_RPWM` (main.h) | 20 kHz / 10 bites LEDC PWM |
+| GPIO27 | EN | Motor meghajtó engedély (Cytron DIR / IBT-2 engedély) | `PWM_ENABLE` (main.h) | aktív magas |
+| GPIO16 | RX2 | Serial2 RX – GPS NMEA bemenet | `Serial2` | 115200 baud |
+| GPIO17 | TX2 | Serial2 TX – RTCM kimenet a GPS vevőnek | `Serial2` | 115200 baud |
+| GPIO21 | SDA | I2C adat – ADS1115 ADC (0x48) + BNO08x IMU | `Wire` | 400 kHz |
+| GPIO22 | SCL | I2C óra – ADS1115 ADC + BNO08x IMU | `Wire` | 400 kHz |
+| GPIO23 | MOSI | SPI MOSI hálózat a nyákon | – | a firmware jelenleg nem használja |
+| GPIO19 | MISO | SPI MISO hálózat a nyákon | – | a firmware jelenleg nem használja |
+| GPIO18 | CLK | SPI CLK hálózat a nyákon | – | a firmware jelenleg nem használja |
+| GPIO5 | SS | SPI SS hálózat a nyákon | – | a firmware jelenleg nem használja |
+| GPIO25 | STEER | Kormánykapcsoló (GND = aktív) | `STEERSW_PIN` (main.h) | INPUT_PULLUP |
+| GPIO26 | WORK | Munkakapcsoló (GND = aktív) | `WORKSW_PIN` (main.h) | INPUT_PULLUP |
+| GPIO4 | AP_FORCE | Kényszerített AP mód jumper | `AP_FORCE_PIN` (main.h) | belső pull-up; ha induláskor GND-re van zárva, AP módban indul (lásd a 3.1. „AP és STA mód működése" részt) |
+
+### Ismert ütközés
+
+- A `Configuration.h`-ban az `IMPULSE_PIN` (sebesség-impulzus kimenet) alapbeállítása szintén **GPIO25** – ugyanaz a láb, mint a `STEERSW_PIN`. Mivel a `setup()`-ban az `initInput()` fut később (bemenetként konfigurálja), a láb végül bemenet marad, így **a sebesség-impulzus kimenet jelenleg nem működőképes**. Ha a funkció kell, az `IMPULSE_PIN`-et szabad lábra kell áthelyezni (pl. GPIO13).
+
+### Szabad lábak
+
+| GPIO | Típus | Megjegyzés |
+|---|---|---|
+| GPIO13 | teljes értékű | belső pull-up; szabad – új funkciókhoz javasolt |
+| GPIO32 | teljes értékű | belső pull-up; szabad |
+| GPIO33 | teljes értékű | belső pull-up; szabad |
+| GPIO34 | csak bemenet | **nincs belső pull-up** (külső ellenállás kell) |
+| GPIO35 | csak bemenet | nincs belső pull-up |
+| GPIO36 | csak bemenet | nincs belső pull-up; `WAS_SENSOR_PIN`-ként definiálva (main.h), de a firmware a külső ADS1115-öt használja → gyakorlatilag szabad |
+| GPIO39 | csak bemenet | nincs belső pull-up; `LOAD_SENSOR_PIN`-ként definiálva (main.h), a firmware nem használja → gyakorlatilag szabad |
+| GPIO0, GPIO2, GPIO15 | strap-láb | a boot-viselkedést befolyásolják – kerülendők, illetve csak óvatosan használhatók |
+| GPIO6–GPIO11 | – | a modul belső flash chipje, nem elérhetők |
+
+---
+
+## 10. Konfiguráció és EEPROM
 
 - Minden hangolható konstans egy helyen: [include/Configuration.h](include/Configuration.h).
 - 96 bájtos EEPROM elrendezés: azonosító, `SteerSettingsData` (PID/steer beállítások, PGN 252 payload), `SteerConfigData` (funkció-jelzők, PGN 251 payload), IP-cím, és opcionálisan az auto-tune Kd érték.
@@ -172,7 +222,7 @@ Ez a modul kapta a legtöbb egyedi fejlesztést ebben a firmware-ben:
 
 ---
 
-## 10. Összehasonlítás a hivatalos AgOpenGPS Teensy AIO v2.5 firmware-rel
+## 11. Összehasonlítás a hivatalos AgOpenGPS Teensy AIO v2.5 firmware-rel
 
 Referencia: [`AgOpenGPS-Official/Boards` – `TeensyModules/AIO v2.5/Firmware/Autosteer_gps_teensy_v2_5`](https://github.com/AgOpenGPS-Official/Boards/tree/main/TeensyModules/AIO%20v2.5/Firmware/Autosteer_gps_teensy_v2_5)
 
@@ -219,7 +269,7 @@ Referencia: [`AgOpenGPS-Official/Boards` – `TeensyModules/AIO v2.5/Firmware/Au
 
 ---
 
-## 11. Build
+## 12. Build
 
 ```powershell
 cd Boards\ESP32_AGOPEN
