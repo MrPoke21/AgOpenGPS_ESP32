@@ -70,7 +70,7 @@ void initInput() {
     xTaskCreatePinnedToCore(
       adcTaskFunction,
       "adcRead",
-      2048,      // Stack size
+      4096,     // Stack size (HWM measured: 820 B free at 2048)
       NULL,      // Parameter
       1,         // Priority (low - will not block main loop)
       &adcTaskHandle,  // Task handle

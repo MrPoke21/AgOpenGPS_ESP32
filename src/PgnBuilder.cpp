@@ -22,12 +22,13 @@ uint8_t* PgnBuilder::BuildSteerDataPgn(float steerAngleActual, float imuHeading,
   buf[6] = (uint8_t)((angleInt >> 8) & 0xFF);  // high byte
 
   // Heading * 10 (signed, little-endian)
-  int16_t headingInt = (int16_t)(imuHeading * 10.0f);
+
+  int16_t headingInt = PgnBuilder::PLACEHOLDER_HEADING_X10;
   buf[7] = (uint8_t)(headingInt & 0xFF);       // low byte
   buf[8] = (uint8_t)((headingInt >> 8) & 0xFF);  // high byte
 
   // Roll * 10 (signed, little-endian)
-  int16_t rollInt = (int16_t)(imuRoll * 10.0f);
+  int16_t rollInt = PgnBuilder::PLACEHOLDER_ROLL_X10;
   buf[9] = (uint8_t)(rollInt & 0xFF);          // low byte
   buf[10] = (uint8_t)((rollInt >> 8) & 0xFF);  // high byte
 

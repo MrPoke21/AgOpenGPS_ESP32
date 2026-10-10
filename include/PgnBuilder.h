@@ -132,6 +132,7 @@ class PgnBuilder {
   // Module source addresses (packets we send)
   static const uint8_t SOURCE_AUTO_STEER = 126;  // 0x7E
   static const uint8_t SOURCE_IMU = 121;         // 0x79
+  static const uint8_t SOURCE_GPS = 120;         // 0x78
 
   // ===== PGN identifiers =====
   static const uint8_t PGN_AUTOSTEER = 0xFE;        // 254 - AutoSteer Data (RX)

@@ -2,11 +2,9 @@
 #include "Configuration.h"
 #include <esp_task_wdt.h>
 #include <freertos/task.h>
-#include "zSerial.h"
-#if ENABLE_UDP
-  #include "zUDP.h"
-  extern QueueHandle_t udpSendQueue;  // defined in zUDP.cpp
-#endif
+#include <freertos/queue.h>
+#include "zUDP.h"
+extern QueueHandle_t udpSendQueue;  // defined in zUDP.cpp
 
 #define MON_MAX_TASKS 12
 struct MonEntry {
@@ -30,7 +28,7 @@ void initTaskMonitor() {
   xTaskCreatePinnedToCore(
     taskMonitorTask,
     "taskMon",
-    2048,   // Stack size
+    4096,   // Stack size (HWM measured: only 396 B free at 2048 - String building)
     NULL,
     1,      // Low priority - supervision must not disturb the control loop
     &monHandle,
@@ -66,25 +64,39 @@ static void taskMonitorTask(void* params) {
     // A low value means the task came close to overflowing its stack.
     for (int i = 0; i < monEntryCount; i++) {
       UBaseType_t hwm = uxTaskGetStackHighWaterMark(monEntries[i].handle);
-      DEBUG_PRINTF("[TASKMON]   %-14s hwm=%u words\n",
+      DEBUG_PRINTF("[TASKMON]   %-14s hwm=%u B\n",
                    monEntries[i].name, (unsigned)hwm);
     }
 
     // --- Queue depths: show packet backlog before packets get dropped ---
-#if ENABLE_UDP
     if (udpSendQueue != NULL) {
       DEBUG_PRINTF("[TASKMON] udpSendQueue depth=%u\n",
                    (unsigned)uxQueueMessagesWaiting(udpSendQueue));
     }
-#endif
-#if !ENABLE_UDP
-    if (serialSendQueue != NULL) {
-      DEBUG_PRINTF("[TASKMON] serialSendQueue depth=%u\n",
-                   (unsigned)uxQueueMessagesWaiting(serialSendQueue));
-    }
-#endif
 
     esp_task_wdt_reset();
     vTaskDelay(pdMS_TO_TICKS(5000));
   }
+}
+
+// ===== TELEMETRY EXPORT (web UI /status) =====
+void taskMonitorAppendStatus(String& j) {
+  const char q = '"';
+  j += ','; j += q; j += "tmTasks"; j += q; j += ':'; j += String(monEntryCount);
+  j += ','; j += q; j += "udpq"; j += q; j += ':';
+  j += String((udpSendQueue != NULL) ? (int)uxQueueMessagesWaiting(udpSendQueue) : -1);
+
+  String hwm;
+  hwm += '{';
+  for (int i = 0; i < monEntryCount; i++) {
+    UBaseType_t h = uxTaskGetStackHighWaterMark(monEntries[i].handle);
+    if (i > 0) hwm += ',';
+    hwm += q;
+    hwm += monEntries[i].name;
+    hwm += q;
+    hwm += ':';
+    hwm += String((unsigned)h);
+  }
+  hwm += '}';
+  j += ','; j += q; j += "tmHwm"; j += q; j += ':'; j += hwm;
 }

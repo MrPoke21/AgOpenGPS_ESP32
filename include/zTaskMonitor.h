@@ -26,6 +26,18 @@
  */
 void taskMonitorRegister(const char* name, TaskHandle_t handle);
 
+/**
+ * Append the task-monitor telemetry fields to a JSON object under
+ * construction (called by the web UI /status handler). Appends
+ * leading-comma separated "key":value pairs - call it before the closing
+ * brace of the JSON object:
+ *   - "tmTasks": number of registered tasks
+ *   - "udpq":    UDP send-queue depth (-1 when the queue does not exist)
+ *   - "tmHwm":   per-task stack high-water mark in bytes (ESP-IDF measures
+ *                stack HWM in bytes, not FreeRTOS words), keyed by task name
+ */
+void taskMonitorAppendStatus(String& j);
+
 void initTaskMonitor();
 
 #endif  // ZTASKMONITOR_H

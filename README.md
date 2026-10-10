@@ -1,6 +1,6 @@
 # ESP32_AGOPEN – AgOpenGPS Autosteer Firmware (ESP32)
 
-Ez a projekt egy **ESP32-WROOM-32** alapú autosteer (automata kormányzás) firmware az [AgOpenGPS](https://github.com/AgOpenGPS-Official) rendszerhez. Feladata: a GPS vevő NMEA adatainak feldolgozása, opcionális IMU (BNO08x) tájolás-számítás, a kormánymotor PID-alapú szabályozása, és mindezek kommunikálása az AgIO (PC-s AgOpenGPS kliens) felé Soros vagy WiFi/UDP kapcsolaton keresztül.
+Ez a projekt egy **ESP32-WROOM-32** alapú autosteer (automata kormányzás) firmware az [AgOpenGPS](https://github.com/AgOpenGPS-Official) rendszerhez. Feladata: a GPS vevő NMEA adatainak feldolgozása, opcionális IMU (BNO08x) tájolás-számítás, a kormánymotor PID-alapú szabályozása, és mindezek kommunikálása az AgIO (PC-s AgOpenGPS kliens) felé WiFi/UDP kapcsolaton keresztül (AP vagy STA módban).
 
 A build rendszer **PlatformIO** (`platformio.ini`, `env:esp32dev`).
 
@@ -28,14 +28,15 @@ A webes felület két fülre van osztva: a **Beállítások** fülön találhat�
 - **Kapcsolók:** kormány- és munkakapcsoló állapota
 - **Beállítások (AgOpenGPS):** LowPWM/HighPWM/MinPWM, SteerSensorCounts, WAS offset, Ackerman fix
 - **Rendszer:** szabad RAM, CPU hőmérséklet, futásidő, WiFi RSSI, csatlakozott kliensek
+- **Task monitor:** regisztrált taskok száma, UDP küldősor mélysége, taskonkénti stack high-water mark (bájtban – alacsony érték = a task közel került a stack kimerüléséhez; a HWM a boot óta mért legkisebb szabad hely, csak csökkenhet)
 
 ---
 
 ## 1. Architektúra
 
 - **Platform**: ESP32-WROOM-32, dual-core Xtensa LX6 @ 240 MHz, Arduino keretrendszer + FreeRTOS.
-- **Core 0**: a soros csomagparser task (`autoSteerPacketPerser`, prioritás 25) és – ha engedélyezve van – a WiFi stack.
-- **Core 1**: háttér ADC-olvasó task (`adcTaskFunction`, prioritás 1) és a soros/UDP küldő taskok (prioritás 10).
+- **Core 1**: a csomagparser task (`autoSteerPacketPerser`, prioritás 25) és a háttér ADC-olvasó task (`adcTaskFunction`, prioritás 1).
+- **Core 0**: a WiFi stack, az UDP I/O task (`udpIO`, prioritás 5 – RTCM fogadás + küldő sor kiürítése), a `wifiMon` kapcsolat-figyelő task (prio 1), a `webConfig` webes felület task (prio 1) és a `taskMon` task/heap felügyelő (prio 1).
 - **`loop()`** felépítése ([src/main.cpp](src/main.cpp)):
   - `imuTask()` – minden iterációban lefut, kiüríti a BNO08x belső puffert (nincs benne trigonometria, csak nyers kvaternion mentés).
   - `gpsStream()` – nem blokkoló, karakterenkénti NMEA beolvasás a `Serial2`-ről (max. 64 karakter/iteráció).
@@ -43,7 +44,7 @@ A webes felület két fülre van osztva: a **Beállítások** fülön találhat�
   - `t_inputSwitches` (5 Hz) – kapcsolók beolvasása.
   - `t_autosteerLoop` (`AUTOSTEER_INTERVAL`, alapból 50 Hz) – PID szabályozási ciklus.
 
-A cél a **soha nem blokkoló főciklus**: minden I2C/Serial/UDP művelet vagy külön taskban, vagy karakter-/csomag-korlátozott adagokban fut.
+A cél a **soha nem blokkoló főciklus**: minden I2C/UART/UDP művelet vagy külön taskban, vagy karakter-/csomag-korlátozott adagokban fut.
 
 ### Fájlstruktúra
 
@@ -52,7 +53,8 @@ A cél a **soha nem blokkoló főciklus**: minden I2C/Serial/UDP művelet vagy k
 | [src/main.cpp](src/main.cpp) | Setup, fő ciklus, task létrehozás, EEPROM inicializálás |
 | [src/zHandlers.cpp](src/zHandlers.cpp) / [include/zHandlers.h](include/zHandlers.h) | NMEA GGA/VTG kezelők, BNO08x IMU mintavételezés és tájolás-számítás |
 | [src/zPackets.cpp](src/zPackets.cpp) / [include/zPackets.h](include/zPackets.h) | AgOpenGPS bináris PGN protokoll fel-/lebontása |
-| [src/zSerial.cpp](src/zSerial.cpp) / [src/zUDP.cpp](src/zUDP.cpp) | Soros és opcionális WiFi/UDP kommunikáció (queue-alapú, aszinkron küldés) |
+| [src/zUDP.cpp](src/zUDP.cpp) / [include/zUDP.h](include/zUDP.h) | AgOpenGPS WiFi/UDP kommunikáció (queue-alapú, aszinkron küldés), RTCM→Serial2 továbbítás, WiFi kapcsolat-figyelő |
+| [src/zTaskMonitor.cpp](src/zTaskMonitor.cpp) / [include/zTaskMonitor.h](include/zTaskMonitor.h) | Task/heap felügyelő: stack high-water mark, queue-mélység, Task Watchdog Timer |
 | [src/zAutosteer.cpp](src/zAutosteer.cpp) / [src/AutosteerPID.cpp](src/AutosteerPID.cpp) | Kormányszög-számítás, PID szabályozó, motorvezérlés |
 | [src/zInput.cpp](src/zInput.cpp) | ADS1115 ADC nem blokkoló olvasása (kormányszög-érzékelő, nyomás/áram szenzor) |
 | [src/zSpeedImpulse.cpp](src/zSpeedImpulse.cpp) | Opcionális sebesség-impulzus kimenet (hardver timer alapú) |
@@ -81,7 +83,7 @@ Fontosabb PGN-ek ([src/zPackets.cpp](src/zPackets.cpp)):
 | 0xC8 (200) | AgIO → board | „Hello” handshake |
 | 0xCA (202) | board → AgIO | Scan válasz (helyi IP, ha WiFi aktív) |
 
-**Kettős csatorna**: soros porton mindig fut a kommunikáció; opcionálisan (`ENABLE_UDP`) egy `WiFiUDP`-alapú WiFi kapcsolat is aktiválható AP vagy STA módban, saját küldő-sorral és háttér taskkal.
+**Egyetlen csatorna – WiFi/UDP**: minden AgOpenGPS kommunikáció WiFi/UDP-n fut (`WiFiUDP`-alapú, AP vagy STA módban), saját küldő-sorral és háttér taskkal (`udpIO`). A korábbi USB-soros szállítási mód megszűnt; a `Serial2` kizárólag a GPS vevővel való kommunikációt (NMEA + RTCM) szolgálja.
 
 ## 3.1. WiFi és UDP beállítások
 
@@ -94,7 +96,6 @@ Az alapértékek az [include/Configuration.h](include/Configuration.h) fájlban 
 | Beállítás | Alapérték | Jelentés |
 |---|---:|---|
 | `ENABLE_WIFI_CONFIG` | `1` | WiFi és webes konfiguráció engedélyezése |
-| `ENABLE_UDP` | `1` | AgOpenGPS UDP kommunikáció engedélyezése |
 | `WIFI_MODE` | `1` | `1` = AP mód, `0` = STA mód |
 | `WIFI_SSID` | `AGOPEN_ESP32_AP` | Alap AP SSID és kezdeti STA SSID |
 | `WIFI_PASS` | `12345678` | Alap AP jelszó és kezdeti STA jelszó |
@@ -107,12 +108,12 @@ Az AP és STA SSID/jelszó, az üzemmód, az AP csatornája és az AgOpenGPS UDP
 ### AP és STA mód működése
 
 - **AP mód**: az ESP32 saját WiFi hálózatot hoz létre. Ez általában a legalacsonyabb késleltetésű működés, és a készülék az `192.168.4.1` címen érhető el.
-- **STA mód**: az ESP32 a beállított külső WiFi hálózathoz csatlakozik. A csatlakozási kísérlet **nincs időkorlátozva** – addig próbálkozik, amíg sikerül (~30 másodpercenként újraindítja a kapcsolódási kísérletet), és közben 10 másodpercenként állapotot ír a soros monitorra (`[UDP] Connecting to "SSID"... N s`).
+- **STA mód**: az ESP32 a beállított külső WiFi hálózathoz csatlakozik. A csatlakozási kísérlet **nincs időkorlátozva** – addig próbálkozik, amíg sikerül (~30 másodpercenként újraindítja a kapcsolódási kísérletet), és közben 10 másodpercenként állapotot ír a debug logba (`[UDP] Connecting to "SSID"... N s`), ami a webes felület **/log** oldalán követhető (a debug engedélyezése után).
 - **Nincs automatikus AP fallback**: a STA kapcsolódáshoz nincs időkorlát, a firmware nem vált vissza automatikusan AP módba. **Fontos:** amíg a STA csatlakozás nem jön létre, a webes felület és az UDP kommunikáció sem indul el (a kapcsolódás a `setup()`-ban blokkol). Ha a STA hálózat nem érhető el, és AP módra van szükség, zárjuk GND-re a `GPIO4` (`AP_FORCE_PIN`) lábat, és indítsuk újra a készüléket.
 - **Szakadáskezelés (futásidejű)**: a boot után egy külön `wifiMonitor` task 2 másodpercenként figyeli a STA kapcsolatot. Megszakadásnál frissíti a `wifiStatus` állapotot (a webes telemetria mindig a valós állapotot mutatja), és **30 másodpercenként újra elindítja a kapcsolódást** – a firmware végtelen ideig próbálkozik. A WiFi driver saját auto-reconnectje is aktív, amely a tipikus szakadási okokat (AP újraindítás, beacon timeout, jeltompulás stb.) magától kezeli.
-- **Küldés szakadás alatt**: amíg a STA kapcsolat nincs meg, a kimenő UDP csomagok eldobódnak – a küldő sor nem telik meg, és nem keletkezik lwIP hibaüzenet-cső a Soros porton (az blokkolhatná az időkritikus taskokat). A hibanapló bejegyzések legfeljebb 5 másodpercenként egyszer jelennek meg. Újracsatlakozás után a kommunikáció az első bejövő AgOpenGPS csomagtól folytatódik – a kliens IP:port párosa minden forrásváltozásnál automatikusan újra tanulásra kerül (AgOpenGPS/AgIO újraindítást és új DHCP-címet is eltűr).
+- **Küldés szakadás alatt**: amíg a STA kapcsolat nincs meg, a kimenő UDP csomagok eldobódnak – a küldő sor nem telik meg, és nem keletkezik lwIP hibaüzenet-áradás a debug logban (az blokkolhatná az időkritikus taskokat). A hibanapló bejegyzések legfeljebb 5 másodpercenként egyszer jelennek meg. Újracsatlakozás után a kommunikáció az első bejövő AgOpenGPS csomagtól folytatódik – a kliens IP:port párosa minden forrásváltozásnál automatikusan újra tanulásra kerül (AgOpenGPS/AgIO újraindítást és új DHCP-címet is eltűr).
 - **Internet-szakadás**: az ESP32 maga **nem használ internetet** (nincs benne DNS, NTP vagy TCP kliens; az NTRIP kapcsolatot a PC-n futó AgOpenGPS/AgIO tartja). Internet-kimaradáskor ezért a board nem fut hibába: csak az RTCM korrekciós adatforgalom szünetel (a GPS fix romolhat DGPS-re), és ha az AgIO csomagok is elmaradnak, az autokormány az 1 másodperces csomag-időtúllépéssel biztonságosan kikapcsol. Amint a hálózat visszaáll, a kommunikáció magától folytatódik.
-- **Kényszerített AP mód (jumper)**: az [include/main.h](include/main.h) fájlban definiált `AP_FORCE_PIN` (`GPIO4`, a nyákon szabadon maradt láb) belső pull-up-pal magas. Ha induláskor ez a láb **GND-re van zárva** (jumper vagy kapcsoló), a készülék **AP módban indul**, akkor is, ha a webes felületen STA mód volt elmentve. A felülírás csak az adott bootra él – NVS-be nem mentődik, így a jumper eltávolítása és újraindítás után a korábban beállított mód áll vissza. A kényszerített állapot a soros porton (`[WIFI] AP_FORCE_PIN GND-re zarva...`) és a webes felületen is jelezve van.
+- **Kényszerített AP mód (jumper)**: az [include/main.h](include/main.h) fájlban definiált `AP_FORCE_PIN` (`GPIO4`, a nyákon szabadon maradt láb) belső pull-up-pal magas. Ha induláskor ez a láb **GND-re van zárva** (jumper vagy kapcsoló), a készülék **AP módban indul**, akkor is, ha a webes felületen STA mód volt elmentve. A felülírás csak az adott bootra él – NVS-be nem mentődik, így a jumper eltávolítása és újraindítás után a korábban beállított mód áll vissza. A kényszerített állapot a debug logban (`[WIFI] AP_FORCE_PIN GND-re zarva...`) jelezve van – ez a webes felület **/log** oldalán látható, miután a debugot engedélyezték.
 
 A WiFi energiatakarékos módja ki van kapcsolva az alacsonyabb kommunikációs késleltetés érdekében. A TX teljesítmény és a WiFi RX/TX pufferek értékei szintén az [include/Configuration.h](include/Configuration.h) fájlban állíthatók.
 
@@ -177,8 +178,8 @@ A táblázatok a nyák (SCH_ESP32_AG_2025-02-10) tényleges bekötését és a f
 
 | GPIO | Nyák / jel | Funkció | Firmware konstans | Megjegyzés |
 |---|---|---|---|---|
-| GPIO1 (TX0) | – | USB soros (debug konzol) | `Serial` | modul belső USB-UART |
-| GPIO3 (RX0) | – | USB soros (debug konzol) | `Serial` | modul belső USB-UART |
+| GPIO1 (TX0) | – | USB soros – `Serial` (a debug log a webes /log oldalon fut, a soros kimenet nincs használatban) | `Serial` | modul belső USB-UART |
+| GPIO3 (RX0) | – | USB soros – `Serial` (bemenet nincs használatban, a buffer csak biztonsági drain miatt létezik) | `Serial` | modul belső USB-UART |
 | GPIO12 | LPWM | Motor LPWM (IBT-2 bal / Cytron PWM) | `PWM1_LPWM` (main.h) | **strap-láb (MTDI): boot közben soha ne húzzuk GND-re** – 1,8 V-os flash tápfeszültséget választana és az eszköz nem indul el |
 | GPIO14 | RPWM | Motor RPWM (IBT-2 jobb / Cytron PWM) | `PWM2_RPWM` (main.h) | 20 kHz / 10 bites LEDC PWM |
 | GPIO27 | EN | Motor meghajtó engedély (Cytron DIR / IBT-2 engedély) | `PWM_ENABLE` (main.h) | aktív magas |
@@ -242,7 +243,7 @@ Referencia: [`AgOpenGPS-Official/Boards` – `TeensyModules/AIO v2.5/Firmware/Au
 | **Kerékenkóder (ShaftEncoder)** | Konfigurációs bit létezik, de **nincs megvalósítva** | Teljes ISR-alapú implementáció | Teensy jobb |
 | **Remote bemenet** | Nincs | Van (`REMOTE_PIN`) | Teensy jobb |
 | **Nyomás/áram szenzor bemenet** | ADS1115 (külső I2C ADC), nem blokkoló háttér task, medián szűrő | Beépített `analogRead()`, EMA szűrő, blokkoló a fő cikluson belül | **ESP32 jobb** architektúrálisan (nem blokkol), de plusz alkatrészt (ADS1115) igényel |
-| **Kommunikáció** | Soros **és/vagy** opcionális WiFi/UDP (AP vagy STA, aszinkron küldő-sor) | Soros **és/vagy** vezetékes Ethernet (NativeEthernet, csak Teensy 4.1) | Attól függ: WiFi rugalmasabb (nincs kábel), de az Ethernet stabilabb/kisebb késleltetésű ipari környezetben. Vezeték nélküli integráció ESP32-n egyszerűbb, mert beépített rádió van |
+| **Kommunikáció** | WiFi/UDP (AP vagy STA, aszinkron küldő-sor) | Soros **és/vagy** vezetékes Ethernet (NativeEthernet, csak Teensy 4.1) | Attól függ: WiFi rugalmasabb (nincs kábel), de az Ethernet stabilabb/kisebb késleltetésű ipari környezetben. Vezeték nélküli integráció ESP32-n egyszerűbb, mert beépített rádió van |
 | **NTRIP/RTCM támogatás** | Van (PGN 215 → `Serial2` átjátszás egyetlen GPS vevőhöz) | Van (RTCM átjátszás rádió/soros porton, 2 vevőnek) | Teensy jobb – ott 2 vevő (pozíció + heading) kapja meg a korrekciót, és rádiós bemenet is van rá |
 | **Auto-baud GPS detektálás** | Nincs | Van (UBX parancsokkal automatikusan detektálja és beállítja a vevő baud rate-jét) | Teensy jobb |
 | **Sebesség-impulzus kimenet** | Dedikált hardver-timer, megszakítás-alapú, konfigurálható impulzus/méter | `tone()` alapú, szoftveres, fix 130 impulzus/méter | ESP32 jobb (pontosabb, kevésbé terheli a CPU-t) |
@@ -256,7 +257,7 @@ Referencia: [`AgOpenGPS-Official/Boards` – `TeensyModules/AIO v2.5/Firmware/Au
 1. **GPS–IMU időbeli szinkronizáció** – ez a legjelentősebb technikai különbség. A Teensy egyszerűen a legutóbb leolvasott BNO-mintát küldi ki minden GGA-hoz, ami akár 10-20 ms csúszást is jelenthet 100 Hz-es IMU mellett. Az ESP32-verzió SLERP-interpolációval a GGA pontos érkezési pillanatára számítja át az orientációt.
 2. **Adaptív kiugrás-szűrés** az IMU adatokon (szögsebesség-alapú, nem fix dot-product küszöb).
 3. **Opcionális auto-tanuló PID** (P+I+D, öntanuló D-tag) – a hivatalos firmware-ben egyáltalán nincs I/D szabályzás.
-4. **Nem blokkoló architektúra mindenhol** (ADC külön taskban, soros/UDP küldés queue-n keresztül) – kevésbé érzékeny az I2C/kommunikációs késleltetésekre.
+4. **Nem blokkoló architektúra mindenhol** (ADC külön taskban, UDP küldés queue-n keresztül) – kevésbé érzékeny az I2C/kommunikációs késleltetésekre.
 5. Pontosabb, kevésbé CPU-igényes sebesség-impulzus generálás.
 
 **Ahol a hivatalos Teensy firmware jobb / teljesebb:**
@@ -275,7 +276,7 @@ Referencia: [`AgOpenGPS-Official/Boards` – `TeensyModules/AIO v2.5/Firmware/Au
 cd Boards\ESP32_AGOPEN
 pio run                       # fordítás
 pio run --target upload       # feltöltés (upload_port a platformio.ini-ben)
-pio device monitor -b 460800  # soros monitor
+pio device monitor -b 115200  # soros monitor (a debug log a webes /log oldalon fut)
 ```
 
 Külső könyvtárfüggőségek (`platformio.ini`): `Adafruit BNO08x`, `Adafruit ADS1X15`.

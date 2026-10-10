@@ -11,7 +11,6 @@
 #include <zAutosteer.h>
 #include <zUDP.h>
 #include <zWebConfig.h>
-#include <zSerial.h>
 #ifdef SPEED_IMPULSE_ENABLED
   #include <zSpeedImpulse.h>
 #endif
@@ -100,9 +99,11 @@ void autosteerSetup() {
 
 void setup() {
   // Setup Serial Monitor
+  /*
   Serial.setRxBufferSize(SERIAL_BUFFER_SIZE);  // RX
   Serial.setRxFIFOFull(32);
   Serial.begin(115200);
+  */
   Serial2.setTxBufferSize(4096);  // TX
   Serial2.begin(115200, SERIAL_8N1, 16, 17);
   delay(500);
@@ -115,10 +116,8 @@ void setup() {
   autosteerSetup();
   initTaskMonitor();  // Task/heap supervisor + TWDT init (must run before task creation)
 
-#if ENABLE_UDP
   // Must exist before autoSteerPacketPerser starts - receiveUDP() polls the socket
   initUDPQueues();
-#endif
 
   TaskHandle_t uartRxHandle = NULL;
   xTaskCreatePinnedToCore(
@@ -131,22 +130,13 @@ void setup() {
         1       // Core 1 - shares the core with loop() (prio 25 preempts loop)
     );
     taskMonitorRegister("UART_RX", uartRxHandle);
-    
-#if !ENABLE_UDP
-  // Serial TX queue is only needed when UDP is disabled
-  if (!initSerialQueue()) {
-    DEBUG_PRINTLN("[SETUP] Serial queue initialization failed");
-  }
-#endif
 
   // Initialize WiFi + web configuration portal (independent of the UDP data path)
 #if ENABLE_WIFI_CONFIG
   if (initWiFiConfigPortal()) {
     printWiFiStatus();
-#if ENABLE_UDP
     delay(500);
     initUDP();
-#endif
   } else {
     DEBUG_PRINTLN("[SETUP] WiFi initialization failed");
   }
@@ -214,13 +204,8 @@ void sendData(byte* data, uint8_t datalen) {
   
   DEBUG_PRINT("[SEND] Sending ");
   DEBUG_PRINT(datalen);
-  DEBUG_PRINT(" bytes via ");
-  
-  // Send via Serial and/or UDP depending on configuration
-#if ENABLE_UDP
-  // Send both Serial and UDP
-  DEBUG_PRINTLN("UDP");
-  //Serial.write(data, datalen);
+  DEBUG_PRINTLN(" bytes via UDP");
+
   if (!sendUDP(data, datalen)) {
     // Throttled: fires per packet (up to 50 Hz) while the link is down
     static uint32_t lastDropLog = 0;
@@ -229,11 +214,4 @@ void sendData(byte* data, uint8_t datalen) {
       DEBUG_PRINTLN("[SEND] ERROR: UDP queue full - packet dropped!");
     }
   }
-#else
-  // Only Serial - send via queue (non-blocking)
-  DEBUG_PRINTLN("Serial");
-  if (!sendSerial(data, datalen)) {
-    DEBUG_PRINTLN("[SEND] ERROR: Serial queue full - packet dropped!");
-  }
-#endif
 }

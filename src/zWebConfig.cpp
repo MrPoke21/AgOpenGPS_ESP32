@@ -122,7 +122,7 @@ static String jsonSafeText(const char* src, size_t maxLen) {
 // single field can show a one-tick-stale value, which is fine for a monitor.
 static void handleStatus() {
   String j;
-  j.reserve(1400);
+  j.reserve(2000);
 
   // ── AUTOTUNE / PID (first - the tuning-relevant values) ─────────────────────
   j = "{\"kp\":" + String(steerSettings.gainP);
@@ -190,6 +190,9 @@ static void handleStatus() {
   j += ",\"minheap\":" + String(ESP.getMinFreeHeap());
   j += ",\"temp\":" + String(temperatureRead(), 1);
   j += ",\"up\":" + String(millis() / 1000UL);
+
+  // ── Task monitor (task count, UDP queue depth, per-task stack HWM) ─────────
+  taskMonitorAppendStatus(j);
 
   j += "}";
 
@@ -362,13 +365,16 @@ static void handleRoot() {
     "{s:'Rendszer',k:'mode',l:'WiFi uzemmod',f:'s'},"
     "{s:'Rendszer',k:'fap',l:'Kenyszeritett AP mod (GPIO4 GND jumper)',f:'yn'},"
     "{s:'Rendszer',k:'ip',l:'IP cim',f:'s'},"
-    "{s:'Rendszer',k:'clients',l:'Csatlakozott WiFi kliensek',f:'n0'},"
+    "{s:'Rendszer',k:'clients',l:'WiFi kliensek (AP mod) / kapcsolat (STA: 1=ok)',f:'n0'},"
     "{s:'Rendszer',k:'rssi',l:'WiFi jeloerosseg (RSSI)',f:'rssi'},"
     "{s:'Rendszer',k:'udp',l:'UDP port',f:'n0'},"
     "{s:'Rendszer',k:'heap',l:'Szabad RAM (heap)',f:'n0',u:'B'},"
     "{s:'Rendszer',k:'minheap',l:'Minimum szabad RAM',f:'n0',u:'B'},"
     "{s:'Rendszer',k:'temp',l:'CPU homerseklet',f:'n1',u:'\\u00b0C'},"
-    "{s:'Rendszer',k:'up',l:'Futasi ido',f:'dur'}"
+    "{s:'Rendszer',k:'up',l:'Futasi ido',f:'dur'},"
+    "{s:'Task monitor',k:'tmTasks',l:'Regisztralt taskok szama',f:'n0'},"
+    "{s:'Task monitor',k:'udpq',l:'UDP kuldosor (vart csomagok)',f:'n0'},"
+    "{s:'Task monitor',k:'tmHwm',l:'Task stack minimum (bajt)',f:'hwm'}"
     "];"
     "var statBox=document.getElementById('statusBox');"
     "var statMsg=document.getElementById('statMsg');"
@@ -385,6 +391,7 @@ static void handleRoot() {
       "if(f.f==='b')return v?'BE':'KI';"
       "if(f.f==='yn')return v?'Igen':'Nem';"
       "if(f.f==='s')return String(v);"
+      "if(f.f==='hwm'){var p=[];for(var k in v){p.push(k+'='+v[k]);}return p.join(', ');}"
       "if(f.f==='ms')return Math.round(v)+' ms';"
       "if(f.f==='rssi')return v?Math.round(v)+' dBm':'-';"
       "if(f.f==='dur')return fmtDur(v);"

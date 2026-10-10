@@ -32,29 +32,12 @@ void autoSteerPacketPerser(void *pvParameters) {
   esp_task_wdt_add(NULL);  // Subscribe to the Task Watchdog (10 s timeout)
   while (1) {
     esp_task_wdt_reset();  // Feed the watchdog every iteration
-#if ENABLE_UDP == 1
     // Blocks until a packet arrives - event-driven, no polling delay
     uint16_t udpLen = receiveUDP((uint8_t*)buffer, BUFFER_SIZE);
     if (udpLen > 0) {
       DEBUG_PRINTF("[PKT] Received %d bytes from UDP\n", udpLen);
       processPacketBytes(buffer, udpLen);
     }
-#else
-    // Process Serial data only - non-blocking byte-by-byte read
-    int aas = Serial.available();
-    if (aas > 0) {
-      int readCount = (aas > 64) ? 64 : aas;
-      DEBUG_PRINT("[PKT] Received ");
-      DEBUG_PRINT(readCount);
-      DEBUG_PRINTLN(" bytes from Serial");
-      for (int i = 0; i < readCount; i++) {
-        byte b = Serial.read();
-        buffer[i] = b;
-      }
-      processPacketBytes(buffer, readCount);
-    }
-     vTaskDelay(pdMS_TO_TICKS(1));  // Prevent watchdog reset, yield to other tasks
-#endif
   }
 }
 
@@ -63,7 +46,7 @@ void processPacketBytes(byte* dataBuffer, uint16_t dataLen) {
   byte a;
   for (int i = 0; i < dataLen; i++) {
     a = dataBuffer[i];
-    
+
     // Prevent buffer overflow
     if (stateIndex >= MAX_PACKET_SIZE - 1) {
       DEBUG_PRINTLN("ERROR: Packet buffer overflow");
@@ -286,7 +269,6 @@ void parsePacket(byte* packet, int size) {
         {
           // Make really sure this is the scan request pgn (via PgnBuilder)
           if (PgnBuilder::TryParseScanRequest(packet, (size_t)packetLength)) {
-#if ENABLE_UDP
             // Build scan reply with local IP and remote subnet
             IPAddress myIP;
 
@@ -304,11 +286,14 @@ void parsePacket(byte* packet, int size) {
             // PGN 203 scan reply, CRC computed by the builder
             sendData(PgnBuilder::BuildScanReplyPgn(PgnBuilder::SOURCE_AUTO_STEER, localIp, remoteSubnet),
                      PgnBuilder::SCAN_REPLY_PGN_SIZE);
-#else
-            // Serial-only build: no IP addresses available
-            sendData(PgnBuilder::BuildScanReplyPgn(PgnBuilder::SOURCE_AUTO_STEER, NULL, NULL),
-                     PgnBuilder::SCAN_REPLY_PGN_SIZE);
-#endif
+            if(useBNO08x) {
+              sendData(PgnBuilder::BuildScanReplyPgn(PgnBuilder::SOURCE_IMU, localIp, remoteSubnet),
+                       PgnBuilder::SCAN_REPLY_PGN_SIZE);
+            }
+            if(GGA_Available) {
+              sendData(PgnBuilder::BuildScanReplyPgn(PgnBuilder::SOURCE_GPS, localIp, remoteSubnet),
+                       PgnBuilder::SCAN_REPLY_PGN_SIZE);
+            }
             DEBUG_PRINTLN("[PKT] Response sent: scanReply (0xCB)");
           }
           break;

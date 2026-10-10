@@ -84,15 +84,8 @@
 #define MAX_PWM_VALUE 255
 
 // ==================== WiFi & UDP CONFIGURATION ====================
-/** Enable the WiFi radio + web configuration portal (1: enabled, 0: disabled).
- *  Independent from ENABLE_UDP: the config web page can run even while
- *  autosteer data still goes over USB/Serial, so WiFi/latency can be
- *  tested without touching the live data path. */
+/** Enable the WiFi radio + web configuration portal (1: enabled, 0: disabled) */
 #define ENABLE_WIFI_CONFIG 1
-
-/** Enable WiFi/UDP as the autosteer data transport instead of Serial (1: enabled, 0: disabled).
- *  Requires ENABLE_WIFI_CONFIG to be enabled as well. */
-#define ENABLE_UDP 1
 
 /** Port for the WiFi configuration web page */
 #define WEB_SERVER_PORT 80

@@ -1,5 +1,4 @@
 #include "zUDP.h"
-#include "zSerial.h"
 #include "zWebConfig.h"
 #include "Configuration.h"
 #include "zTaskMonitor.h"
@@ -131,7 +130,7 @@ bool initWiFi() {
     xTaskCreatePinnedToCore(
       wifiMonitorTask,
       "wifiMon",
-      2048,
+      4096,  // Stack size (HWM measured: 680 B free at 2048)
       NULL,
       1,   // Low priority - monitoring only
       &wifiMonHandle,
@@ -216,7 +215,6 @@ bool sendUDP(const uint8_t* data, uint16_t length) {
 }
 
 void sendNMEA(const uint8_t* data, uint16_t length) {
-#if ENABLE_UDP
   if (!sendUDP(data, length)) {
     // Throttled: this fires per packet (up to 50 Hz) while the link is down
     static uint32_t lastQueueFullLog = 0;
@@ -225,11 +223,6 @@ void sendNMEA(const uint8_t* data, uint16_t length) {
       DEBUG_PRINTLN("[SEND] ERROR: UDP queue full or no client");
     }
   }
-#else
-  if (!sendSerial(data, length)) {
-    DEBUG_PRINTLN("[SEND] ERROR: Serial queue full");
-  }
-#endif
 }
 
 // ===== RECEIVE UDP DATA (polls WiFiUDP, blocks until a packet arrives) ======
