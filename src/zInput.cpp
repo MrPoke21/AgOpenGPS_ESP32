@@ -1,4 +1,5 @@
 #include <Configuration.h>
+#include "zTaskMonitor.h"
 #include <zInput.h>
 #include <freertos/semphr.h>
 
@@ -65,15 +66,17 @@ void initInput() {
     lastADCReadTime = millis();
     
     // Create FreeRTOS task for ADC reading (runs on Core 1, low priority)
+    TaskHandle_t adcTaskHandle = NULL;
     xTaskCreatePinnedToCore(
       adcTaskFunction,
       "adcRead",
       2048,      // Stack size
       NULL,      // Parameter
-      1,         // Priority (low - won't block main loop)
-      NULL,      // Task handle
+      1,         // Priority (low - will not block main loop)
+      &adcTaskHandle,  // Task handle
       1          // Core 1 (leaves Core 0 for WiFi)
     );
+    taskMonitorRegister("adcRead", adcTaskHandle);
     
     DEBUG_PRINTLN("[ADC] Background task created for non-blocking reads");
   } else {

@@ -1,5 +1,6 @@
 #include "zWebConfig.h"
 #include "zUDP.h"
+#include "zTaskMonitor.h"
 #include "zDebugLog.h"
 #include "main.h"
 #include "zInput.h"
@@ -545,15 +546,17 @@ bool initWiFiConfigPortal() {
   // Serviced from its own Core 0 task (see webServerTask) - never called from
   // the shared loop() on Core 1, so a slow HTTP request can't stall
   // autosteerLoop()/gpsStream() timing.
+  TaskHandle_t webCfgHandle = NULL;
   xTaskCreatePinnedToCore(
     webServerTask,
     "webConfig",
     8192,
     NULL,
-    1,  // Low priority - well below udpSendTask(10)/autoSteerPacketPerser(25)
-    NULL,
+    1,  // Low priority - well below udpIO(5)/autoSteerPacketPerser(25)
+    &webCfgHandle,
     0   // Core 0
   );
+  taskMonitorRegister("webConfig", webCfgHandle);
 
   return ok;
 }

@@ -1,5 +1,6 @@
 
 #include <Arduino.h>
+#include <esp_task_wdt.h>
 #include <Configuration.h>
 #include <zPackets.h>
 #include <zUDP.h>
@@ -28,7 +29,9 @@ int count;
 
 
 void autoSteerPacketPerser(void *pvParameters) {
+  esp_task_wdt_add(NULL);  // Subscribe to the Task Watchdog (10 s timeout)
   while (1) {
+    esp_task_wdt_reset();  // Feed the watchdog every iteration
 #if ENABLE_UDP == 1
     // Blocks until a packet arrives - event-driven, no polling delay
     uint16_t udpLen = receiveUDP((uint8_t*)buffer, BUFFER_SIZE);

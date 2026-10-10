@@ -1,5 +1,6 @@
 #include "zSerial.h"
 #include <freertos/queue.h>
+#if !ENABLE_UDP
 
 // Serial send queue
 QueueHandle_t serialSendQueue = NULL;
@@ -63,3 +64,4 @@ void serialSendTask(void* params) {
   }
   vTaskDelete(NULL);
 }
+#endif

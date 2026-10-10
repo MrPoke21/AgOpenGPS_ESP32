@@ -45,7 +45,6 @@ bool initUDP();
 /**
  * Forward incoming RTCM UDP packets from port 2233 to Serial2.
  */
-void rtcmReceiveTask(void* params);
 
 /**
  * WiFi monitor task - STA reconnect watchdog (run in separate task).
@@ -66,7 +65,7 @@ bool sendUDP(const uint8_t* data, uint16_t length);
 /**
  * UDP send task - processes queued packets (run in separate task)
  */
-void udpSendTask(void* params);
+void udpIOTask(void* params);
 
 /**
  * Send an ASCII NMEA sentence to Serial or UDP depending on configuration

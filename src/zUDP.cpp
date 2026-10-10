@@ -2,7 +2,9 @@
 #include "zSerial.h"
 #include "zWebConfig.h"
 #include "Configuration.h"
+#include "zTaskMonitor.h"
 #include <esp_wifi.h>
+#include <esp_task_wdt.h>
 
 // ===== GLOBAL VARIABLES =====
 WiFiStatus wifiStatus = WIFI_INIT;
@@ -125,15 +127,17 @@ bool initWiFi() {
 
     // Runtime watchdog for later drops (see wifiMonitorTask) - refreshes the
     // status and keeps reconnecting forever while the STA link is down
+    TaskHandle_t wifiMonHandle = NULL;
     xTaskCreatePinnedToCore(
       wifiMonitorTask,
       "wifiMon",
       2048,
       NULL,
       1,   // Low priority - monitoring only
-      NULL,
+      &wifiMonHandle,
       0    // Core 0 (WiFi stack)
     );
+    taskMonitorRegister("wifiMon", wifiMonHandle);
 
     return true;
   }
@@ -158,27 +162,19 @@ bool initUDP() {
     udpSocketReady = true;
     DEBUG_PRINTF("[UDP] Listening on port %d\n", wifiRuntimeConfig.udpPort);
 
-    // Start background tasks only after both UDP sockets are open.
+    // Start the combined UDP I/O task (RTCM receive + data send) only after
+    // both UDP sockets are open. One task serves both directions (2 ms poll).
+    TaskHandle_t udpIOHandle = NULL;
     xTaskCreatePinnedToCore(
-      udpSendTask,
-      "udpSend",
-      2048,
-      NULL,
-      10,  // Increased priority from 1 to 10 (higher = more priority)
-      NULL,
-      0  // Core 0 (WiFi stack uses Core 0)
-    );
-
-    DEBUG_PRINTF("[RTCM] Listening on UDP port %d, forwarding to Serial2\n", RTCM_UDP_PORT);
-    xTaskCreatePinnedToCore(
-      rtcmReceiveTask,
-      "rtcmReceive",
+      udpIOTask,
+      "udpIO",
       4096,
       NULL,
-      1,
-      NULL,
+      5,  // Above wifiMon(1); yields every 2 ms so it never starves the WiFi stack
+      &udpIOHandle,
       0
     );
+    taskMonitorRegister("udpIO", udpIOHandle);
     return true;
   } else {
     rtcmUdp.stop();
@@ -311,14 +307,45 @@ void printWiFiStatus() {
   DEBUG_PRINTLN("=======================\n");
 }
 
-// ===== UDP SEND TASK (Background) =====
-void udpSendTask(void* params) {
+// ===== COMBINED UDP I/O TASK (RTCM receive -> Serial2 + send queue -> UDP) =====
+// Merges the former udpSendTask and rtcmReceiveTask into one 2 ms polling
+// loop: one task and one stack serve both directions, and the send queue is
+// drained non-blocking so it can never stall the RTCM forwarding.
+void udpIOTask(void* params) {
+  esp_task_wdt_add(NULL);  // Subscribe to the Task Watchdog (10 s timeout)
+  uint8_t rtcmBuffer[RTCM_PACKET_BUFFER_SIZE];
   UDPPacket packet;
   static uint32_t lastFailLogMs = 0;  // throttle: max one failure log / 5 s
 
-  while (1) {
-    // Wait for packet in queue (1000ms timeout)
-    if (xQueueReceive(udpSendQueue, &packet, pdMS_TO_TICKS(1000))) {
+  for (;;) {
+    esp_task_wdt_reset();
+
+    // --- RTCM receive: poll the socket, forward every datagram to Serial2 ---
+    int packetSize = rtcmUdp.parsePacket();
+    if (packetSize > 0) {
+      while (packetSize > 0) {
+        int bytesToRead = (packetSize > (int)sizeof(rtcmBuffer)) ? sizeof(rtcmBuffer) : packetSize;
+        int bytesRead = rtcmUdp.read(rtcmBuffer, bytesToRead);
+        if (bytesRead <= 0) {
+          break;
+        }
+        Serial2.write(rtcmBuffer, bytesRead);
+        packetSize -= bytesRead;
+      }
+    } else if (packetSize < 0) {
+      // WiFiUDP can retain an invalid socket after a WiFi reconnect. Reopen it
+      // instead of continuously reporting the same socket error.
+      rtcmUdp.stop();
+      vTaskDelay(pdMS_TO_TICKS(100));
+      if (rtcmUdp.begin(RTCM_UDP_PORT)) {
+        DEBUG_PRINTF("[RTCM] UDP socket reopened on port %d\n", RTCM_UDP_PORT);
+      } else {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+      }
+    }
+
+    // --- Data send: non-blocking drain of the send queue ---
+    while (xQueueReceive(udpSendQueue, &packet, 0) == pdTRUE) {
       // While the STA link is down, DISCARD the queued packets instead of
       // hammering lwIP: every failed sendto would print a lwIP error on Serial
       // (up to 50 packets/s), flooding the UART and stalling high-priority
@@ -343,39 +370,9 @@ void udpSendTask(void* params) {
         }
       }
     }
-  }
-  vTaskDelete(NULL);
-}
 
-// ===== RTCM RECEIVE TASK (UDP 2233 -> Serial2) =====
-void rtcmReceiveTask(void* params) {
-  uint8_t buffer[RTCM_PACKET_BUFFER_SIZE];
-
-  while (true) {
-    int packetSize = rtcmUdp.parsePacket();
-    if (packetSize > 0) {
-      while (packetSize > 0) {
-        int bytesToRead = (packetSize > (int)sizeof(buffer)) ? sizeof(buffer) : packetSize;
-        int bytesRead = rtcmUdp.read(buffer, bytesToRead);
-        if (bytesRead <= 0) {
-          break;
-        }
-        Serial2.write(buffer, bytesRead);
-        packetSize -= bytesRead;
-      }
-    } else if (packetSize < 0) {
-      // WiFiUDP can retain an invalid socket after a WiFi reconnect. Reopen it
-      // instead of continuously reporting the same socket error.
-      rtcmUdp.stop();
-      vTaskDelay(pdMS_TO_TICKS(100));
-      if (rtcmUdp.begin(RTCM_UDP_PORT)) {
-        DEBUG_PRINTF("[RTCM] UDP socket reopened on port %d\n", RTCM_UDP_PORT);
-      } else {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-      }
-    } else {
-      vTaskDelay(pdMS_TO_TICKS(1));
-    }
+    // Fixed 2 ms poll: low RTCM latency without the former 1 kHz busy-polling
+    vTaskDelay(pdMS_TO_TICKS(2));
   }
 }
 

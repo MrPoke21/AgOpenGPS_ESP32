@@ -2,6 +2,7 @@
 #define ZSERIAL_H
 
 #include <Arduino.h>
+#include <freertos/queue.h>
 #include "Configuration.h"
 
 // Serial packet queue structure
@@ -16,6 +17,8 @@ struct SerialPacket {
  * Initialize Serial Queue (non-blocking serial writes)
  * @return true if successful
  */
+#if !ENABLE_UDP
+extern QueueHandle_t serialSendQueue;  // Serial TX queue (only used when UDP is disabled)
 bool initSerialQueue();
 
 /**
@@ -30,5 +33,6 @@ bool sendSerial(const uint8_t* data, uint16_t length);
  * Serial send task - processes queued packets (run in separate task)
  */
 void serialSendTask(void* params);
+#endif
 
 #endif

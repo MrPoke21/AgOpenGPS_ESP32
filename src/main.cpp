@@ -1,5 +1,6 @@
 #include "Configuration.h"
 #include <main.h>
+#include "zTaskMonitor.h"
 #include <AutosteerPID.h>
 #include <Wire.h>
 #include "zNMEAParser.h"
@@ -112,26 +113,31 @@ void setup() {
   Wire.setClock(400000);
   delay(500);
   autosteerSetup();
+  initTaskMonitor();  // Task/heap supervisor + TWDT init (must run before task creation)
 
 #if ENABLE_UDP
-  // Must exist before autoSteerPacketPerser starts - it blocks on udpRecvQueue
+  // Must exist before autoSteerPacketPerser starts - receiveUDP() polls the socket
   initUDPQueues();
 #endif
 
-    xTaskCreatePinnedToCore(
-      autoSteerPacketPerser,
+  TaskHandle_t uartRxHandle = NULL;
+  xTaskCreatePinnedToCore(
+    autoSteerPacketPerser,
         "UART_RX",
-        8192,   // Stack size
+        4096,   // Stack size (taskMon logs HWM - raise back if it drops below ~1 KB)
         NULL,
-        25,     // Magas prioritás (0-24 a FreeRTOS-ban, 25 azért jó)
-        NULL,
-        1       // CORE 0
+        25,     // High priority (FreeRTOS range 0-24, 25 chosen on purpose)
+        &uartRxHandle,
+        1       // Core 1 - shares the core with loop() (prio 25 preempts loop)
     );
+    taskMonitorRegister("UART_RX", uartRxHandle);
     
-  // Initialize Serial queue (always, whether UDP is enabled or not)
+#if !ENABLE_UDP
+  // Serial TX queue is only needed when UDP is disabled
   if (!initSerialQueue()) {
     DEBUG_PRINTLN("[SETUP] Serial queue initialization failed");
   }
+#endif
 
   // Initialize WiFi + web configuration portal (independent of the UDP data path)
 #if ENABLE_WIFI_CONFIG
