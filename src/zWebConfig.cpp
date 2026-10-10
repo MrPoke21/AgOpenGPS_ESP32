@@ -525,9 +525,9 @@ bool initWiFiConfigPortal() {
   apForcedByPin = (digitalRead(AP_FORCE_PIN) == LOW);
   if (apForcedByPin) {
     wifiRuntimeConfig.mode = 1;
-    // Serial (nem DebugLog): boot közben a debug log alapból ki van kapcsolva,
-    // a DEBUG_PRINT a webes felület engedélyezéséig nem írna ki semmit.
-    Serial.println("[WIFI] AP_FORCE_PIN GND-re zarva - kenyszeritett AP mod ebben a bootban!");
+    // DEBUG (DebugLog): a debug boot kozben alapbol ki van kapcsolva, igy ez az
+    // uzenet csak a debug engedelyezese utan latszik a webes /log oldalon.
+    DEBUG_PRINTLN("[WIFI] AP_FORCE_PIN GND-re zarva - kenyszeritett AP mod ebben a bootban!");
   }
 
   bool ok = initWiFi();  // starts AP or STA per wifiRuntimeConfig.mode

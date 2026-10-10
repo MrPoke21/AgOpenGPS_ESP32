@@ -207,7 +207,7 @@ void parsePacket(byte* packet, int size) {
           // Heading/roll keep the placeholder values of the classic firmware
           // (999.9 deg / 888.8 deg) until real IMU values are wired in.
           sendData(PgnBuilder::BuildSteerDataPgn(
-                       (int16_t)(steerAngleActual * 100),
+                       steerAngleActual,
                        PgnBuilder::PLACEHOLDER_HEADING_X10,
                        PgnBuilder::PLACEHOLDER_ROLL_X10,
                        switchByte, pwmDisplay),

@@ -14,9 +14,9 @@ void calcSteeringPID(void);
 void adaptKp(void);
 #ifdef USE_AUTOTUNE_PID
 void loadAutoTuneKd(void);
-/** Currently learned (auto-tuned) D gain - exposed for the web Telemetria tab */
+/** Currently learned (auto-tuned) D gain - exposed for the web Telemetry tab */
 float getLearnedKd(void);
-/** Current I-term accumulator state (pre-gain) - exposed for the web Telemetria tab */
+/** Current I-term accumulator state (pre-gain) - exposed for the web Telemetry tab */
 float getIntegralError(void);
 #endif
 

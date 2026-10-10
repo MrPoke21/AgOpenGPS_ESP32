@@ -70,7 +70,7 @@ uint8_t* PgnBuilder::BuildHelloFromAutoSteerPgn(float steerAngleActual,
   buf[4] = 5;  // data length
 
   // Actual steer angle * 100 (signed, little-endian)
-  int16_t angleInt = (int16_t)(steerAngleActual * 100.0f);
+  int16_t angleInt = (int16_t)(steerAngleActual*100.0f);
   buf[5] = (uint8_t)(angleInt & 0xFF);         // low byte
   buf[6] = (uint8_t)((angleInt >> 8) & 0xFF);  // high byte
 

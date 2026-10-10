@@ -5,12 +5,17 @@
 #include <zUDP.h>
 #include <AutosteerPID.h>
 
+// Minimum continuous hold time (ms) required before the steer button toggle fires.
+// 0.5 s rejects switch contact bounce and EMI blips, which previously caused the
+// random on/off toggling of steerEnable in steerButton (momentary) mode.
+#ifndef STEERBTN_HOLD_TOGGLE_MS
+  #define STEERBTN_HOLD_TOGGLE_MS 500
+#endif
+
 void readInputSwitches() {
   // Button toggle state variables (static = memory persists between calls)
   static uint8_t currentState = 1;
   static uint8_t reading = 0;
-  static uint8_t previous = 0;
-  static unsigned long lastDebugTime = 0;
 
   // read all the switches
   workSwitch = !gpio_get_level((gpio_num_t)WORKSW_PIN);
@@ -22,6 +27,7 @@ void readInputSwitches() {
   {
     // Detect steerEnable state change from external sources
     static uint8_t lastSteerEnable = 0;
+    static unsigned long holdStartMs = 0;   // 0.5 s long-press hold timer
     
     reading = !gpio_get_level((gpio_num_t)STEERSW_PIN);  // inverted: 1 when button shorted to GND
     
@@ -31,12 +37,20 @@ void readInputSwitches() {
       lastSteerEnable = steerEnable;
     }
     
-    // Toggle on rising edge (LOW to HIGH transition) - now detects GND release
-    if (reading == HIGH && previous == LOW) {
-      currentState = currentState ? 0 : 1;  // Toggle state
-      steerSwitch = currentState;
+    // Debounced toggle: the button must be held continuously for
+    // STEERBTN_HOLD_TOGGLE_MS (0.5 s) before the steer toggle fires. Any
+    // bounce / EMI blip (<0.5 s) resets the hold timer, so it can no
+    // longer cause the random on/off toggling of steerEnable seen before.
+    if (reading == HIGH) {
+      if (holdStartMs == 0) { holdStartMs = millis(); }
+      else if (millis() - holdStartMs >= STEERBTN_HOLD_TOGGLE_MS) {
+        currentState = currentState ? 0 : 1;
+        steerSwitch = currentState;
+        holdStartMs = 0;  // re-arm for the next press
+      }
+    } else {
+      holdStartMs = 0;  // released -> reset hold timer
     }
-    previous = reading;
   } else // No steer switch and no steer button - keep steerSwitch at default (1)
   {
     // When no physical switch is configured, steerSwitch remains 1
@@ -44,8 +58,7 @@ void readInputSwitches() {
     // This prevents steerSwitch from being affected by guidance packets
   }
   switchByte = 0;
-  switchByte |= (steerSwitch << 1); // put steerswitch status in bit 1
-                                    // position
+  switchByte |= (steerSwitch << 1); // put steerswitch status in bit 1 position
   switchByte |= workSwitch;
 }
 

@@ -399,7 +399,7 @@ void BuildNmea(void) {
 double convertToDecimalDegrees(const char *latLon, const char *direction) {
   // Input validation
   if (!latLon || !direction || latLon[0] == '\0') {
-    Serial.println("ERROR: Invalid lat/lon string");
+    DEBUG_PRINTLN("ERROR: Invalid lat/lon string");
     return 0.0;
   }
   
@@ -413,7 +413,7 @@ double convertToDecimalDegrees(const char *latLon, const char *direction) {
     len = min - latLon;                // find the length of degrees
     
     if (len < 0 || len > 3) {
-      Serial.println("ERROR: Invalid lat/lon format");
+      DEBUG_PRINTLN("ERROR: Invalid lat/lon format");
       return 0.0;
     }
     

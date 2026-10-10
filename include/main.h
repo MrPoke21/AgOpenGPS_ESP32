@@ -2,6 +2,7 @@
 #define MAIN_H
 
 #include <EEPROM.h>
+#include "Configuration.h"
 #include "CyclicTimer.h"
 #include <PgnBuilder.h>
 
@@ -41,10 +42,10 @@
 #define WORKSW_PIN 26
 
 //------------------------ Forced AP mode jumper -----------------------
-// Induláskor a belső pull-up HIGH-ra húzza; ha a láb GND-re van zárva
-// (jumper/kapcsoló), az eszköz AP módban indul, függetlenül az NVS-ben
-// tárolt WiFi üzemmódtól (a felülírás csak az adott bootra él).
-// GPIO4: a nyákon (SCH_ESP32_AG_2025-02-10) bekötetlen, szabad láb.
+// The internal pull-up keeps the pin HIGH at boot; if the pin is tied to GND
+// (jumper/switch), the device starts in AP mode regardless of the WiFi mode
+// stored in NVS (the override only applies to the current boot).
+// GPIO4: an unconnected, free pin on the board (SCH_ESP32_AG_2025-02-10).
 #define AP_FORCE_PIN 4
 
 #define CONST_180_DIVIDED_BY_PI 57.2957795130823
@@ -127,8 +128,8 @@ public:
   // Bounds-checked write method
   bool writeBytes(const byte* value, int length, int index) {
     if (index + length > DATA_SIZE) {
-      Serial.print("ERROR: NmeaPGN buffer overflow at index ");
-      Serial.println(index);
+      DEBUG_PRINT("ERROR: NmeaPGN buffer overflow at index ");
+      DEBUG_PRINTLN(index);
       return false;
     }
     memcpy(&data[index], value, length);

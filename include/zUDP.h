@@ -103,6 +103,6 @@ void printWiFiStatus();
 extern WiFiStatus wifiStatus;
 extern WiFiUDP udp;
 extern IPAddress udpRemoteIP;
-extern uint16_t udpRemotePort;
+extern const uint16_t udpRemotePort;
 
 #endif

@@ -29,26 +29,26 @@
 
 // ==================== MOTOR CONTROL ====================
 
-// ── Vezérlési mód választó ───────────────────────────────────────────────────
-// USE_AUTOTUNE_PID: teljes PID (P+I+D) öntanuló D taggal
-// Kommenteld ki az eredeti P-only logikához
+// ── Control mode selector ────────────────────────────────────────────────────
+// USE_AUTOTUNE_PID: full PID (P+I+D) with a self-learning D term
+// Comment out for the original P-only logic
 #define USE_AUTOTUNE_PID
 // ────────────────────────────────────────────────────────────────────────────
 
-// ── Öntanuló D tag (auto-tune) – csak USE_AUTOTUNE_PID esetén aktív ─────────
-/** Maximális D erősítés értéke */
+// ── Self-learning D term (auto-tune) - only active when USE_AUTOTUNE_PID ────
+/** Maximum D gain value */
 #define KD_MAX            200.0f
-/** Értékelési ablak (sample-ek száma): KD_TUNE_WINDOW * 20ms = értékelési periódus */
+/** Evaluation window (number of samples): KD_TUNE_WINDOW * 20ms = evaluation period */
 #define KD_TUNE_WINDOW    25       // 25 * 20ms = 500ms
-/** Kd növelési lépés oszcilláció detektálásakor */
+/** Kd increase step when oscillation is detected */
 #define KD_STEP_UP        2.0f
-/** Kd csökkentési lépés jól csillapított menet esetén */
+/** Kd decrease step when the drive is well damped */
 #define KD_STEP_DOWN      0.5f
-/** EEPROM mentési periódus (ms) – legalább ennyi idő teljen el mentések között */
-#define KD_SAVE_INTERVAL_MS  300000UL  // 5 perc
-/** I tag erősítés (fixed, nincs AOG beállítás) */
+/** EEPROM save period (ms) - minimum time between two saves */
+#define KD_SAVE_INTERVAL_MS  300000UL  // 5 minutes
+/** I term gain (fixed, no AOG setting) */
 #define KI_GAIN           0.5f
-/** I tag anti-windup korlát (összegyűlt hiba maximuma) */
+/** I term anti-windup clamp (maximum accumulated error) */
 #define KI_MAX_INTEGRAL   50.0f
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -166,5 +166,5 @@
 
 /** Speed output pin configured*/
 #define SPEED_IMPULSE_ENABLED       //  Uncomment to enable speed impulse output
-#define IMPULSE_PIN 25              // GPIO pin az impulzus kimenethez
-#define PULSES_PER_METER 10         // Impulzusok száma méterenként
+#define IMPULSE_PIN 25              // GPIO pin for the impulse output
+#define PULSES_PER_METER 10         // Pulses per meter

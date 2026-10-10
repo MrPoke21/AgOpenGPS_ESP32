@@ -9,7 +9,10 @@ WiFiStatus wifiStatus = WIFI_INIT;
 WiFiUDP udp;
 WiFiUDP rtcmUdp;
 IPAddress udpRemoteIP;
-uint16_t udpRemotePort = 0;
+// Fixed remote port - AgOpenGPS always sends from this port, so replies
+// always go to the same port. Only the client IP is learned dynamically.
+extern const uint16_t udpRemotePort = 9999;
+static volatile bool udpClientConnected = false;  // true once a client has sent a packet
 
 static constexpr uint16_t RTCM_UDP_PORT = 2233;
 static constexpr size_t RTCM_PACKET_BUFFER_SIZE = 1024;
@@ -41,7 +44,7 @@ bool initWiFi() {
     // AP Mode - create access point (lower latency)
     DEBUG_PRINTLN("[UDP] Starting WiFi Access Point (Lower Latency)");
     WiFi.mode(WIFI_AP);
-    WiFi.softAP(wifiRuntimeConfig.apSsid, wifiRuntimeConfig.apPass, wifiRuntimeConfig.channel);
+    WiFi.softAP(wifiRuntimeConfig.apSsid, wifiRuntimeConfig.apPass);
 
     // Power save can only be applied once the WiFi driver is actually running -
     // calling this before WiFi.mode()/softAP() is a silent no-op (driver not init yet)
@@ -102,10 +105,10 @@ bool initWiFi() {
         DEBUG_PRINTLN("[UDP] Still connecting - re-issuing WiFi.begin()");
       }
 
-      // A soros monitoron is látszik (a debug log boot közben alapból ki van kapcsolva)
+      // A DEBUG uzenetek a webes /log oldalon jelennek meg (a debug engedelyezesevel).
       if (millis() - lastProgressMs >= 10000) {
         lastProgressMs = millis();
-        Serial.printf("[UDP] Connecting to \"%s\"... %lu s\n",
+        DEBUG_PRINTF("[UDP] Connecting to \"%s\"... %lu s\n",
                       wifiRuntimeConfig.staSsid, (unsigned long)((millis() - connectStartMs) / 1000));
       }
 
@@ -204,7 +207,7 @@ bool sendUDP(const uint8_t* data, uint16_t length) {
   }
 
   // No client connected yet
-  if (udpRemotePort == 0) {
+  if (!udpClientConnected) {
     return false;
   }
   
@@ -244,16 +247,16 @@ uint16_t receiveUDP(uint8_t* buffer, uint16_t maxLen) {
     vTaskDelay(pdMS_TO_TICKS(1));  // yield while polling for the next datagram
   }
 
-  // Learn the client IP:port for the replies. Update it whenever the sender
-  // changes: after a WiFi outage (the ESP can get a new IP) or an AgOpenGPS
-  // restart (new source port) the previously learned address would be stale
-  // and every reply would be silently lost. Only one AgOpenGPS client is
+  // Learn the client IP for the replies. The remote port is FIXED
+  // (udpRemotePort = 9999 - AgOpenGPS always sends from this port), so only
+  // the IP is updated whenever the sender changes: after a WiFi outage (the
+  // ESP can get a new IP) the previously learned address would be stale and
+  // every reply would be silently lost. Only one AgOpenGPS client is
   // expected on this port, so "last sender wins" is safe here.
   IPAddress senderIP = udp.remoteIP();
-  uint16_t senderPort = udp.remotePort();
-  if (udpRemotePort == 0 || senderIP != udpRemoteIP || senderPort != udpRemotePort) {
+  if (!udpClientConnected || senderIP != udpRemoteIP) {
     udpRemoteIP = senderIP;
-    udpRemotePort = senderPort;
+    udpClientConnected = true;
     DEBUG_PRINTF("[UDP] Client: %s:%d\n", udpRemoteIP.toString().c_str(), udpRemotePort);
   }
 
@@ -325,12 +328,10 @@ void udpSendTask(void* params) {
         continue;
       }
       // Only send if we have a connected client
-      if (udpRemotePort != 0 && wifiStatus != WIFI_ERROR) {
+      if (udpClientConnected && wifiStatus != WIFI_ERROR) {
         bool success = false;
-        // Unicast to the IP:port the client last sent a packet from
-        // (re-learned in receiveUDP on every source change). Previously this
-        // was a hardcoded 9999, which dropped replies when the client sent
-        // from another port.
+        // Unicast to the client IP with the fixed remote port
+        // (udpRemotePort = 9999, AgOpenGPS always listens on this port).
         if (udp.beginPacket(udpRemoteIP, udpRemotePort)) {
           udp.write(packet.data, packet.length);
           success = udp.endPacket();
@@ -399,17 +400,15 @@ void wifiMonitorTask(void* params) {
 
     if (connected && !wasConnected) {
       wifiStatus = WIFI_STA_CONNECTED;
-      Serial.printf("[WIFI] STA %s, IP: %s\n",
+      DEBUG_PRINTF("[WIFI] STA %s, IP: %s\n",
                     wasConnected ? "ujracsatlakozott" : "csatlakozva",
                     WiFi.localIP().toString().c_str());
-      DEBUG_PRINTF("[WIFI] STA (re)connected, IP: %s\n", WiFi.localIP().toString().c_str());
     } else if (!connected) {
       wifiStatus = WIFI_STA_CONNECTING;
       if (millis() - lastRetryMs >= 30000) {
         lastRetryMs = millis();
         WiFi.reconnect();
-        Serial.println("[WIFI] STA kapcsolat nincs meg - ujracsatlakozas...");
-        DEBUG_PRINTLN("[WIFI] STA down - reconnect issued");
+        DEBUG_PRINTLN("[WIFI] STA kapcsolat nincs meg - ujracsatlakozas...");
       }
     }
 

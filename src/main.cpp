@@ -165,7 +165,7 @@ void loop() {
     while (Serial.available()){
       Serial.read();
     }
-    Serial.println("[LOOP] WARNING: Serial buffer nearing capacity!");
+    DEBUG_PRINTLN("[LOOP] WARNING: Serial buffer nearing capacity!");
   }
   // Poll/drain the IMU every loop iteration (not gated by a slow timer) so
   // a fresh, precisely-timestamped sample is always available for GGA-time

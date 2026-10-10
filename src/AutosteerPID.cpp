@@ -36,7 +36,7 @@ static void saveAutoTuneKd() {
   EEPROM.commit();
   kdDirty    = false;
   lastKdSave = millis();
-  Serial.printf("[AUTOTUNE] Kd=%.1f mentve EEPROM-ba\n", learnedKd);
+  DEBUG_PRINTF("[AUTOTUNE] Kd=%.1f mentve EEPROM-ba\n", learnedKd);
 }
 
 void loadAutoTuneKd() {
@@ -44,23 +44,23 @@ void loadAutoTuneKd() {
   EEPROM.get(80, d);
   if (d.magic == KD_AUTOTUNE_MAGIC) {
     learnedKd = constrain(d.Kd, 0.0f, KD_MAX);
-    Serial.printf("[AUTOTUNE] Kd=%.1f betöltve\n", learnedKd);
+    DEBUG_PRINTF("[AUTOTUNE] Kd=%.1f loaded from EEPROM\n", learnedKd);
   } else {
     learnedKd = 0.0f;
-    Serial.println("[AUTOTUNE] Nincs mentett Kd, nulláról indul");
+    DEBUG_PRINTLN("[AUTOTUNE] No saved Kd, starting from zero");
   }
 }
 
-// Hívd 50 Hz-en (minden PID tick-ben)
+// Call at 50 Hz (on every PID tick)
 static void autoTuneStep(float error) {
   errorHistory[errorIdx] = error;
   errorIdx = (errorIdx + 1) % KD_TUNE_WINDOW;
 
-  // Csak minden KD_TUNE_WINDOW tick-ben értékel (= KD_TUNE_WINDOW * 20ms)
+  // Evaluate only every KD_TUNE_WINDOW ticks (= KD_TUNE_WINDOW * 20ms)
   if (++tuneCounter < KD_TUNE_WINDOW) return;
   tuneCounter = 0;
 
-  // Nullátmenetek számlálása az ablakban
+  // Count zero crossings within the window
   uint8_t crossings = 0;
   for (uint8_t i = 1; i < KD_TUNE_WINDOW; i++) {
     uint8_t a = (errorIdx + i - 1) % KD_TUNE_WINDOW;
@@ -70,25 +70,25 @@ static void autoTuneStep(float error) {
 
   float prevKd = learnedKd;
   if (crossings >= 2) {
-    // Oszcillál → több csillapítás kell
+    // Oscillating -> more damping needed
     learnedKd = constrain(learnedKd + KD_STEP_UP, 0.0f, KD_MAX);
   } else if (crossings == 0 && learnedKd > 0.0f) {
-    // Jól csillapított → lassan visszavesz
+    // Well damped -> slowly reduce
     learnedKd = constrain(learnedKd - KD_STEP_DOWN, 0.0f, KD_MAX);
   }
 
   if (learnedKd != prevKd) {
     kdDirty = true;
-    DEBUG_PRINTF("[AUTOTUNE] Kd: %.1f → %.1f (crossings=%d)\n", prevKd, learnedKd, crossings);
+    DEBUG_PRINTF("[AUTOTUNE] Kd: %.1f -> %.1f (crossings=%d)\n", prevKd, learnedKd, crossings);
   }
 
-  // Időzített mentés
+  // Timed save
   if (kdDirty && (millis() - lastKdSave > KD_SAVE_INTERVAL_MS)) {
     saveAutoTuneKd();
   }
 }
 
-// ── Telemetry getters (web UI Telemetria tab / /status endpoint) ──────────────
+// ── Telemetry getters (web UI Telemetry tab / /status endpoint) ──────────────
 float getLearnedKd(void)    { return learnedKd; }
 float getIntegralError(void) { return integralError; }
 #endif // USE_AUTOTUNE_PID
@@ -107,15 +107,15 @@ void motorStateControl(void) {
     ledcWrite(PWM_CHANNEL_RPWM, 0);
     motorWasEnabled = false;
 #ifdef USE_AUTOTUNE_PID
-    lastError = 0.0f;  // D tag állapot törlése
-    if (kdDirty) saveAutoTuneKd();  // Mentés munkamenet végén
+    lastError = 0.0f;  // Clear D term state
+    if (kdDirty) saveAutoTuneKd();  // Save at end of session
 #endif
-    Serial.println("[MOTOR] Motor safely shut down");
+    DEBUG_PRINTLN("[MOTOR] Motor safely shut down");
   } else if (steerEnable && !motorWasEnabled) {
     // Transition: Motor should be ON
     motorWasEnabled = true;
     digitalWrite(PWM_ENABLE, HIGH);
-    Serial.println("[MOTOR] Motor enabled");
+    DEBUG_PRINTLN("[MOTOR] Motor enabled");
   }
 }
 
@@ -124,15 +124,15 @@ void calcSteeringPID(void) {
   errorAbs = abs(steerAngleError);
 
 #ifdef USE_AUTOTUNE_PID
-  // ── Teljes PID (P+I+D) + öntanuló D tag ────────────────────────────────────
+  // ── Full PID (P+I+D) + self-learning D term ─────────────────────────────────
   // P tag
   pValue = steerSettings.gainP * steerAngleError;
 
-  // I tag – steady-state hiba megszüntetése (anti-windup clamp)
+  // I term - eliminate steady-state error (anti-windup clamp)
   integralError = constrain(integralError + steerAngleError, -KI_MAX_INTEGRAL, KI_MAX_INTEGRAL);
   float iValue = KI_GAIN * integralError;
 
-  // D tag – öntanult csillapítás (nullátmenet-alapú auto-tune)
+  // D term - self-learned damping (zero-crossing based auto-tune)
   float dValue = learnedKd * (steerAngleError - lastError);
   lastError = steerAngleError;
   autoTuneStep(steerAngleError);
@@ -141,13 +141,13 @@ void calcSteeringPID(void) {
 
 #else
   // ── Eredeti P-only logika ──────────────────────────────────────────────────
-  // P szabályozó
+  // P controller
   pValue = steerSettings.gainP * steerAngleError;
   pwmDrive = (int16_t)pValue;
 
 #endif // USE_AUTOTUNE_PID
 
-  // PWM maximum kiszámítása
+  // Compute the PWM maximum
   int16_t newMax = 0;
   if (errorAbs < LOW_HIGH_DEGREES) {
     newMax = (errorAbs * highLowPerDeg) + steerSettings.lowPwm;
@@ -155,14 +155,14 @@ void calcSteeringPID(void) {
     newMax = steerSettings.highPwm;
   }
 
-  // HOLTSÁV KOMPENZÁCIÓ (motor indítás)
+  // DEADBAND COMPENSATION (motor start)
   if (pwmDrive > 0) {
     pwmDrive += steerSettings.minPwm;
   } else if (pwmDrive < 0) {
     pwmDrive -= steerSettings.minPwm;
   }
 
-  // Limitálás ELŐBB – hogy a ramp referencia helyes legyen
+  // Clamp FIRST - so the ramp reference stays correct
   if (pwmDrive > newMax) pwmDrive = newMax;
   if (pwmDrive < -newMax) pwmDrive = -newMax;
 
