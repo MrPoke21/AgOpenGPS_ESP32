@@ -3,9 +3,11 @@
 #include <Arduino.h>
 #include "Configuration.h"
 
-// Runtime WiFi configuration, persisted in NVS (Preferences).
+// Runtime WiFi configuration, persisted in the flash-emulated EEPROM image
+// (see EE_ADDR_WIFI / EEPROM_SIZE in Configuration.h), same storage the
+// steerSettings/steerConfig/AutoTune Kd blocks use.
 // Editable at runtime via the web UI served at http://<device-ip>/
-// Defaults (used only to seed NVS on first boot) come from Configuration.h.
+// Defaults (used only to seed EEPROM on first boot) come from Configuration.h.
 struct WiFiRuntimeConfig {
   uint8_t mode;          // 1 = Access Point, 0 = Station (client)
   char apSsid[33];
@@ -18,11 +20,12 @@ struct WiFiRuntimeConfig {
 
 extern WiFiRuntimeConfig wifiRuntimeConfig;
 
-/** Load WiFi settings from NVS, seeding defaults from Configuration.h on first boot */
+/** Load WiFi settings from EEPROM, seeding defaults from Configuration.h on first boot */
 void loadWiFiRuntimeConfig();
 
-/** Persist the current wifiRuntimeConfig to NVS */
-void saveWiFiRuntimeConfig();
+/** Persist the current wifiRuntimeConfig to EEPROM
+ *  @return true ha a commit() sikeres volt ES a visszaolvasott ertekek megegyeznek */
+bool saveWiFiRuntimeConfig();
 
 /**
  * Load the WiFi config, start WiFi (AP or STA per config) and the config

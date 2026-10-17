@@ -50,6 +50,10 @@ const char *asciiHex = "0123456789ABCDEF";
 // solid whenever a report was flagged bad.
 const float MAX_IMU_ANGULAR_RATE_RADPS = 5.0f;     // ~286 deg/s hard cap
 const float IMU_OUTLIER_ANGLE_MARGIN_RAD = 0.05f;  // ~3 deg noise floor
+// Raw-sample sanity gates: an unit quaternion has norm^2 == 1. Anything far
+// outside this band is a corrupted I2C read, not a real orientation.
+const float IMU_QUAT_NORMSQ_MIN = 0.5f;
+const float IMU_QUAT_NORMSQ_MAX = 2.0f;
 // BNO08x report interval. Draining is now done every loop() iteration (see
 // imuTask()/main.cpp), so this just needs to comfortably exceed the 10Hz
 // GPS rate; it is not the reason for the old stuttering.
@@ -172,6 +176,19 @@ static void slerpQuaternion(float r0, float i0, float j0, float k0,
 // raw quaternion samples as they arrive from the BNO08x (~100Hz), which is
 // what actually keeps the CPU load down.
 void calculateIMU(uint32_t targetTimeUs) {
+  // Staleness watchdog: if the newest accepted sample is far older than now,
+  // the IMU stopped delivering reports (I2C hang, sensor reset loop) and the
+  // angles below are frozen - warn loudly instead of silently feeding a
+  // constant heading to AgOpenGPS.
+  static uint32_t lastStaleLog = 0;
+  if (imuCurr.valid && (uint32_t)(targetTimeUs - imuCurr.time) > 1000000U) {
+    if (millis() - lastStaleLog >= 5000) {
+      lastStaleLog = millis();
+      DEBUG_PRINTF("[IMU] STALE: legujabb minta %lu ms regen erkezett - az IMU nem valaszol?\n",
+                   (unsigned long)((targetTimeUs - imuCurr.time) / 1000U));
+    }
+  }
+
   if (!imuCurr.valid) {
     return;
   }
@@ -191,7 +208,9 @@ void calculateIMU(uint32_t targetTimeUs) {
       float angle = 2.0f * acos(dot);
       float maxAngle = MAX_IMU_ANGULAR_RATE_RADPS * dt + IMU_OUTLIER_ANGLE_MARGIN_RAD;
 
-      if (angle > maxAngle) {
+      if (isnan(angle) || angle > maxAngle) {
+        // Note: a plain "angle > maxAngle" would let NaN through (NaN
+        // comparisons are false), so the isnan() check is mandatory here.
         DEBUG_PRINT(millis());
         DEBUG_PRINT("\tIMU outlier! angle(deg)=");
         DEBUG_PRINTLN(angle * RAD_TO_DEG);
@@ -213,6 +232,10 @@ void calculateIMU(uint32_t targetTimeUs) {
 
 void quaternionToEuler(float qr, float qi, float qj, float qk) {
 
+  // Keep the last good orientation: if anything below produces garbage, we
+  // restore this instead of overwriting ypr with NaN/Inf values.
+  euler_t prevYpr = ypr;
+
   float sqr = sq(qr);
   float sqi = sq(qi);
   float sqj = sq(qj);
@@ -220,6 +243,19 @@ void quaternionToEuler(float qr, float qi, float qj, float qk) {
 
     // Normalizálás ellenőrzése
   float norm_sq = sqr + sqi + sqj + sqk;
+
+  // A degenerate (near-zero or NaN) quaternion must not touch ypr at all -
+  // dividing by ~0 turns every angle into NaN and would poison the output.
+  if (isnan(norm_sq) || norm_sq < 0.01f) {
+    static uint32_t lastDegLog = 0;
+    if (millis() - lastDegLog >= 2000) {
+      lastDegLog = millis();
+      DEBUG_PRINTF("[IMU] Degeneralt kvaternio elutasitva (norma^2=%.4f) - elozo szogek megtartva\n",
+                   (double)norm_sq);
+    }
+    return;
+  }
+
   if (abs(norm_sq - 1.0f) > 0.1f) {
     DEBUG_PRINT(millis());
     DEBUG_PRINT("\tQuat not normalized! norm²=");
@@ -257,6 +293,19 @@ void quaternionToEuler(float qr, float qi, float qj, float qk) {
   if (invertRoll) {
     ypr.roll *= -1;
   }
+
+  // Last line of defense: if any of the trig above still produced a
+  // non-finite angle, restore the previous good orientation instead of
+  // sending garbage heading/roll to AgOpenGPS.
+  if (isnan(ypr.yaw) || isnan(ypr.roll) || isnan(ypr.pitch) ||
+      isinf(ypr.yaw) || isinf(ypr.roll) || isinf(ypr.pitch)) {
+    static uint32_t lastBadLog = 0;
+    if (millis() - lastBadLog >= 2000) {
+      lastBadLog = millis();
+      DEBUG_PRINTLN("[IMU] Nem vegtelen szog a konverziobol - elozo ertek megtartva");
+    }
+    ypr = prevYpr;
+  }
 }
 
 void setReports() {
@@ -292,6 +341,38 @@ void imuTask() {
       continue;
     }
 
+    // ── Raw-sample sanity gate ────────────────────────────────────────────
+    // A corrupted I2C read can yield NaN/Inf components or a wildly off-norm
+    // quaternion. NaN is especially nasty: it silently passes the later
+    // rate-gate in calculateIMU() (NaN comparisons are always false) and
+    // poisons yaw/roll/pitch all the way into the NMEA sentence. Such
+    // samples are physical garbage and are dropped right here, at capture
+    // time - they never reach imuCurr/imuPrev.
+    float qr = sensorValue.un.gameRotationVector.real;
+    float qi = sensorValue.un.gameRotationVector.i;
+    float qj = sensorValue.un.gameRotationVector.j;
+    float qk = sensorValue.un.gameRotationVector.k;
+
+    if (isnan(qr) || isnan(qi) || isnan(qj) || isnan(qk) ||
+        isinf(qr) || isinf(qi) || isinf(qj) || isinf(qk)) {
+      static uint32_t lastNanLog = 0;
+      if (millis() - lastNanLog >= 2000) {
+        lastNanLog = millis();
+        DEBUG_PRINTLN("[IMU] Elutasitva: NaN/Inf kvaternio (serult I2C olvasas?)");
+      }
+      continue;
+    }
+
+    float n2 = qr * qr + qi * qi + qj * qj + qk * qk;
+    if (n2 < IMU_QUAT_NORMSQ_MIN || n2 > IMU_QUAT_NORMSQ_MAX) {
+      static uint32_t lastNormLog = 0;
+      if (millis() - lastNormLog >= 2000) {
+        lastNormLog = millis();
+        DEBUG_PRINTF("[IMU] Elutasitva: hibas kvaternio norma^2=%.3f\n", (double)n2);
+      }
+      continue;
+    }
+
     // status: 0 = unreliable, 1..3 = low/medium/high confidence. This comes
     // straight from the chip's own fusion output, so checking it here is
     // free (no computation of our own).
@@ -301,10 +382,10 @@ void imuTask() {
 
     imuPrev = imuCurr;
     imuCurr.time = (uint32_t)sensorValue.timestamp;  // us, same timebase as micros()
-    imuCurr.qr = sensorValue.un.gameRotationVector.real;
-    imuCurr.qi = sensorValue.un.gameRotationVector.i;
-    imuCurr.qj = sensorValue.un.gameRotationVector.j;
-    imuCurr.qk = sensorValue.un.gameRotationVector.k;
+    imuCurr.qr = qr;
+    imuCurr.qi = qi;
+    imuCurr.qj = qj;
+    imuCurr.qk = qk;
     imuCurr.valid = true;
   }
 }

@@ -6,13 +6,11 @@
 #include "zInput.h"
 #include "zHandlers.h"
 #include "AutosteerPID.h"
-#include <Preferences.h>
+#include <EEPROM.h>
 #include <WebServer.h>
 
 WiFiRuntimeConfig wifiRuntimeConfig;
 
-static const char* NVS_NAMESPACE = "wificfg";
-static Preferences prefs;
 static WebServer configServer(WEB_SERVER_PORT);
 
 static bool restartPending = false;
@@ -35,8 +33,20 @@ static void copyBounded(char* dest, size_t destSize, const char* src) {
   dest[destSize - 1] = '\0';
 }
 
+// ── WiFi konfig EEPROM-blokk ────────────────────────────────────────────────────
+// A WiFi-beallitasok a flash-emulalt EEPROM-ba kerulnek (ugyanabba a NVS
+// "eeprom" namespace-be, amiben a steerSettings/steerConfig/AutoTune Kd is van),
+// az EE_ADDR_WIFI (96) offsettol, sajat magic azonositoval - a steer blokkok
+// (0..85) nem atfedve.
+#define WIFI_EE_MAGIC 0x5746  // "WF"
+
+struct WiFiEEBlock {
+  uint16_t magic;
+  WiFiRuntimeConfig cfg;
+};
+
 void loadWiFiRuntimeConfig() {
-  // Defaults from Configuration.h - used to seed NVS on first boot
+  // Defaults from Configuration.h - used to seed EEPROM on first boot
   wifiRuntimeConfig.mode = WIFI_MODE;
   copyBounded(wifiRuntimeConfig.apSsid, sizeof(wifiRuntimeConfig.apSsid), WIFI_SSID);
   copyBounded(wifiRuntimeConfig.apPass, sizeof(wifiRuntimeConfig.apPass), WIFI_PASS);
@@ -45,35 +55,66 @@ void loadWiFiRuntimeConfig() {
   wifiRuntimeConfig.udpPort = UDP_PORT;
   wifiRuntimeConfig.channel = WIFI_CHANNEL;
 
-  prefs.begin(NVS_NAMESPACE, true);  // read-only
-  bool configured = prefs.getBool("init", false);
-  if (configured) {
-    wifiRuntimeConfig.mode = prefs.getUChar("mode", wifiRuntimeConfig.mode);
-    prefs.getString("apssid", wifiRuntimeConfig.apSsid, sizeof(wifiRuntimeConfig.apSsid));
-    prefs.getString("appass", wifiRuntimeConfig.apPass, sizeof(wifiRuntimeConfig.apPass));
-    prefs.getString("stassid", wifiRuntimeConfig.staSsid, sizeof(wifiRuntimeConfig.staSsid));
-    prefs.getString("stapass", wifiRuntimeConfig.staPass, sizeof(wifiRuntimeConfig.staPass));
-    wifiRuntimeConfig.udpPort = prefs.getUShort("udpport", wifiRuntimeConfig.udpPort);
-    wifiRuntimeConfig.channel = prefs.getUChar("channel", wifiRuntimeConfig.channel);
-  }
-  prefs.end();
+  // Defensive: a main.cpp autosteerSetup()-ja mar meghivta a EEPROM.begin(EEPROM_SIZE)-t,
+  // igy ez csak akkor csinal valami, ha a hivasi sorrend valtozna.
+  EEPROM.begin(EEPROM_SIZE);
 
-  if (!configured) {
-    saveWiFiRuntimeConfig();  // seed NVS so next boot reads back the same defaults
+  WiFiEEBlock block;
+  EEPROM.get(EE_ADDR_WIFI, block);
+  if (block.magic == WIFI_EE_MAGIC) {
+    wifiRuntimeConfig.mode = block.cfg.mode;
+    copyBounded(wifiRuntimeConfig.apSsid, sizeof(wifiRuntimeConfig.apSsid), block.cfg.apSsid);
+    copyBounded(wifiRuntimeConfig.apPass, sizeof(wifiRuntimeConfig.apPass), block.cfg.apPass);
+    copyBounded(wifiRuntimeConfig.staSsid, sizeof(wifiRuntimeConfig.staSsid), block.cfg.staSsid);
+    copyBounded(wifiRuntimeConfig.staPass, sizeof(wifiRuntimeConfig.staPass), block.cfg.staPass);
+    wifiRuntimeConfig.udpPort = block.cfg.udpPort;
+    wifiRuntimeConfig.channel = block.cfg.channel;
+    DEBUG_PRINTF("[WIFI] EEPROM konfig betoltve: mode=%u apSsid=\"%s\" staSsid=\"%s\" udp=%u ch=%u\n",
+                 wifiRuntimeConfig.mode, wifiRuntimeConfig.apSsid, wifiRuntimeConfig.staSsid,
+                 wifiRuntimeConfig.udpPort, wifiRuntimeConfig.channel);
+  } else {
+    // Elso boot (vagy serult blokk) - az alapertekek rogzitese az EEPROM-ba
+    DEBUG_PRINTLN("[WIFI] EEPROM ures/ervenytelen WiFi blokk (elso boot) - alapertekek rogzitese");
+    saveWiFiRuntimeConfig();
   }
 }
 
-void saveWiFiRuntimeConfig() {
-  prefs.begin(NVS_NAMESPACE, false);
-  prefs.putBool("init", true);
-  prefs.putUChar("mode", wifiRuntimeConfig.mode);
-  prefs.putString("apssid", wifiRuntimeConfig.apSsid);
-  prefs.putString("appass", wifiRuntimeConfig.apPass);
-  prefs.putString("stassid", wifiRuntimeConfig.staSsid);
-  prefs.putString("stapass", wifiRuntimeConfig.staPass);
-  prefs.putUShort("udpport", wifiRuntimeConfig.udpPort);
-  prefs.putUChar("channel", wifiRuntimeConfig.channel);
-  prefs.end();
+bool saveWiFiRuntimeConfig() {
+  WiFiEEBlock block;
+  block.magic = WIFI_EE_MAGIC;
+  block.cfg = wifiRuntimeConfig;
+
+  EEPROM.put(EE_ADDR_WIFI, block);
+  // A commit() a flash-iras sikeret jelzi - EZ a tenyleges mentes, ha ez false,
+  // a beallitasok nem maradnak meg ujrainditas utan.
+  if (!EEPROM.commit()) {
+    DEBUG_PRINTLN("[WIFI] HIBA: EEPROM.commit() sikertelen - a WiFi beallitasok NEM mentodtek!");
+    return false;
+  }
+
+  // Visszaolvasasos ellenorzes a put() es a commit() utan (az EEPROM.get az
+  // EEPROM konyvtar RAM-keperol olvas, a commit() sikeresselge a flash-iras
+  // fo jelzese - a readback a put() strukturamasolasat es a blokk egesseget ellenorzi).
+  WiFiEEBlock check;
+  EEPROM.get(EE_ADDR_WIFI, check);
+  bool ok = check.magic == WIFI_EE_MAGIC &&
+            check.cfg.mode == wifiRuntimeConfig.mode &&
+            strcmp(check.cfg.apSsid, wifiRuntimeConfig.apSsid) == 0 &&
+            strcmp(check.cfg.apPass, wifiRuntimeConfig.apPass) == 0 &&
+            strcmp(check.cfg.staSsid, wifiRuntimeConfig.staSsid) == 0 &&
+            strcmp(check.cfg.staPass, wifiRuntimeConfig.staPass) == 0 &&
+            check.cfg.udpPort == wifiRuntimeConfig.udpPort &&
+            check.cfg.channel == wifiRuntimeConfig.channel;
+
+  if (ok) {
+    DEBUG_PRINTF("[WIFI] Beallitasok mentve es ellenorizve (EEPROM OK): mode=%u apSsid=\"%s\" staSsid=\"%s\" udp=%u ch=%u\n",
+                 wifiRuntimeConfig.mode, wifiRuntimeConfig.apSsid, wifiRuntimeConfig.staSsid,
+                 wifiRuntimeConfig.udpPort, wifiRuntimeConfig.channel);
+  } else {
+    DEBUG_PRINTLN("[WIFI] HIBA: a mentett EEPROM blokk visszaolvasasa nem egyezik - a mentes NEM tortent meg!");
+    return false;
+  }
+  return true;
 }
 
 // Escape a value before embedding it in an HTML attribute/text node
@@ -374,7 +415,8 @@ static void handleRoot() {
     "{s:'Rendszer',k:'up',l:'Futasi ido',f:'dur'},"
     "{s:'Task monitor',k:'tmTasks',l:'Regisztralt taskok szama',f:'n0'},"
     "{s:'Task monitor',k:'udpq',l:'UDP kuldosor (vart csomagok)',f:'n0'},"
-    "{s:'Task monitor',k:'tmHwm',l:'Task stack minimum (bajt)',f:'hwm'}"
+    "{s:'Task monitor',k:'tmHwm',l:'Task stack minimum (bajt)',f:'hwm'},"
+    "{s:'Task monitor',k:'rst',l:'Elozo reset oka (osszeomlas-diagnosztika)',f:'s'}"
     "];"
     "var statBox=document.getElementById('statusBox');"
     "var statMsg=document.getElementById('statMsg');"
@@ -504,20 +546,30 @@ static void handleSave() {
   long channel = configServer.arg("channel").toInt();
   wifiRuntimeConfig.channel = (channel >= 1 && channel <= 13) ? (uint8_t)channel : WIFI_CHANNEL;
 
-  saveWiFiRuntimeConfig();
+  bool saved = saveWiFiRuntimeConfig();
 
-  String savedMsg = "<p>Beallitasok mentve. Az eszkoz ujraindul...</p>";
-  if (apForcedByPin) {
-    // A mentett (pl. STA) mód nem érvényesül, míg a jumper GND-n van
-    savedMsg += "<p><b>Figyelem:</b> az AP_FORCE_PIN jelenleg GND-re zarva, a kovetkezo inditas is "
-                "kenyszeritett AP modban tortenik, a fent beallitott modtol fuggetlenul!</p>";
+  String savedMsg;
+  if (saved) {
+    savedMsg = "<p>Beallitasok mentve. Az eszkoz ujraindul...</p>";
+    if (apForcedByPin) {
+      // A mentett (pl. STA) mód nem érvényesül, míg a jumper GND-n van
+      savedMsg += "<p><b>Figyelem:</b> az AP_FORCE_PIN jelenleg GND-re zarva, a kovetkezo inditas is "
+                  "kenyszeritett AP modban tortenik, a fent beallitott modtol fuggetlenul!</p>";
+    }
+  } else {
+    // Sikeres mentes nelkul TILOS ujrainditani: a felhasznalo elvesziteni a
+    // jelenleg mukodo beallitasokat sem, es a hiba a /log oldalon diagnosztizalhato.
+    savedMsg = "<p><b>HIBA:</b> a beallitasok mentese az NVS-be nem sikerult! "
+               "Az eszkoz NEM indul ujra - engedelyezd a DEBUG-ot, nezz utana a logban, majd probald ujra.</p>";
   }
   configServer.send(200, "text/html; charset=utf-8",
     "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>" + savedMsg + "</body></html>");
 
-  // Delay the restart so the HTTP response above has time to flush to the client
-  restartPending = true;
-  restartAtMs = millis() + 800;
+  if (saved) {
+    // Delay the restart so the HTTP response above has time to flush to the client
+    restartPending = true;
+    restartAtMs = millis() + 800;
+  }
 }
 
 bool initWiFiConfigPortal() {

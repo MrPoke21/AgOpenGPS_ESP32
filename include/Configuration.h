@@ -90,6 +90,14 @@
 /** Port for the WiFi configuration web page */
 #define WEB_SERVER_PORT 80
 
+/** Total EEPROM (flash-emulated) size in bytes.
+ *  Layout: 0..1 ident, 10..39 steerSettings, 40..59 steerConfig, 60..63 ipArray,
+ *  80..85 AutoTune Kd (AutoTuneData), 96.. WiFi konfig blokk (WiFiEEBlock). */
+#define EEPROM_SIZE 320
+
+/** Offset of the WiFi configuration block (WiFiEEBlock) inside the EEPROM image */
+#define EE_ADDR_WIFI 96
+
 /** UDP buffer size - max packet size in bytes */
 #define UDP_BUFFER_SIZE 1024
 
@@ -103,9 +111,9 @@
 #define WIFI_TX_BUF_COUNT 64
 
 // ── The following are DEFAULT values only ───────────────────────────────────
-// They seed NVS (Preferences) storage on first boot. After that, the actual
-// mode/SSID/password/UDP port are runtime-configurable via the web page at
-// http://<device-ip>/ and persist across reboots/reflashes.
+// They seed the EEPROM-stored WiFi config block (EE_ADDR_WIFI) on first boot.
+// After that, the actual mode/SSID/password/UDP port are runtime-configurable
+// via the web page at http://<device-ip>/ and persist across reboots/reflashes.
 
 /** Default WiFi operating mode: 1 = AP (creates network), 0 = STA (connects to existing) */
 /** Note: AP mode has lower latency (~10-20ms), STA mode higher (~30-50ms) */

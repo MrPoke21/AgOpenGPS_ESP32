@@ -73,7 +73,7 @@ void autosteerSetup() {
   ledcAttachPin(PWM1_LPWM, PWM_CHANNEL_LPWM);
   ledcAttachPin(PWM2_RPWM, PWM_CHANNEL_RPWM);
 
-  EEPROM.begin(96);  // 80 eredeti + 6 auto-tune (AutoTuneData: magic + Kd)
+  EEPROM.begin(EEPROM_SIZE);  // steer/ident blokkok + AutoTune Kd (80) + WiFi konfig blokk (EE_ADDR_WIFI)
   EEPROM.get(0, EEread);  // read identifier
 
   uint8_t ipArray[] = { 192, 168, 0, 255 };

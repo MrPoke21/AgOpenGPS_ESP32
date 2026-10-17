@@ -8,6 +8,13 @@
 // ===== GLOBAL VARIABLES =====
 WiFiStatus wifiStatus = WIFI_INIT;
 WiFiUDP udp;
+// Dedicated TX socket - the WiFiUDP/lwIP API is NOT thread-safe, and the RX
+// socket above is polled from the Core 1 UART_RX task (receiveUDP) while the
+// send queue is drained here on Core 0. Sharing one socket between two tasks
+// made parsePacket()/endPacket() race on the same lwIP PCB -> random, short
+// network stalls (freeze-then-resume). The TX socket binds an ephemeral local
+// port (0) - AgOpenGPS identifies modules by payload, not by source port.
+static WiFiUDP udpSend;
 WiFiUDP rtcmUdp;
 IPAddress udpRemoteIP;
 // Fixed remote port - AgOpenGPS always sends from this port, so replies
@@ -37,6 +44,27 @@ bool initWiFi() {
   DEBUG_PRINTLN("\n[UDP] Initializing WiFi...");
   DEBUG_PRINTF("[UDP] WiFi Buffer Config: RX=%d, TX=%d (optimized for low latency)\n",
                WIFI_RX_BUF_COUNT, WIFI_TX_BUF_COUNT);
+
+  // ── WiFi esemenynaplozas ────────────────────────────────────────────────────
+  // A multi-secondos hálózati kihagasok (befagy + folytatja) azonositasahoz:
+  // STA disconnect (ok-koddal), ujracsatlakozas, es AP kliens fel/le esemenyek.
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    DEBUG_PRINTF("[WIFI-EV] STA disconnect! reason=%d (%s)\n",
+                 info.wifi_sta_disconnected.reason,
+                 WiFi.disconnectReasonName((wifi_err_reason_t)info.wifi_sta_disconnected.reason));
+  }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    DEBUG_PRINTLN("[WIFI-EV] STA connected");
+  }, ARDUINO_EVENT_WIFI_STA_CONNECTED);
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    DEBUG_PRINTF("[WIFI-EV] STA got IP: %s\n", WiFi.localIP().toString().c_str());
+  }, ARDUINO_EVENT_WIFI_STA_GOT_IP);
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    DEBUG_PRINTLN("[WIFI-EV] AP: kliens csatlakozott");
+  }, ARDUINO_EVENT_WIFI_AP_STACONNECTED);
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    DEBUG_PRINTLN("[WIFI-EV] AP: kliens lecsatlakozott");
+  }, ARDUINO_EVENT_WIFI_AP_STADISCONNECTED);
   
   // Note: RX/TX buffer tuning requires custom esp_wifi_init_config
   // For now, rely on WiFiUDP + disabling power save
@@ -161,6 +189,16 @@ bool initUDP() {
     udpSocketReady = true;
     DEBUG_PRINTF("[UDP] Listening on port %d\n", wifiRuntimeConfig.udpPort);
 
+    // Dedicated TX socket (see the udpSend comment above). Port 0 = lwIP
+    // assigns a free ephemeral local port; packets still go to udpRemoteIP:9999.
+    if (!udpSend.begin(0)) {
+      DEBUG_PRINTLN("[UDP] Failed to open TX socket!");
+      udp.stop();
+      rtcmUdp.stop();
+      udpSocketReady = false;
+      return false;
+    }
+
     // Start the combined UDP I/O task (RTCM receive + data send) only after
     // both UDP sockets are open. One task serves both directions (2 ms poll).
     TaskHandle_t udpIOHandle = NULL;
@@ -229,10 +267,17 @@ void sendNMEA(const uint8_t* data, uint16_t length) {
 uint16_t receiveUDP(uint8_t* buffer, uint16_t maxLen) {
   int packetSize;
   while (!udpSocketReady) {
+    // Ez a task fel van iratkozva a Task Watchdogra (10 s) - a varakozas
+    // NEM hibaallapot, ezert itt is etetni kell, kulonben egy 10 mp-nel
+    // hosszabb csendes periodus (AgIO szunet) paniikot + rebootot okozna!
+    esp_task_wdt_reset();
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 
   while ((packetSize = udp.parsePacket()) == 0) {
+    // Csomagra varas - ez a normal allapot (AgIO csendje), etetni kell a
+    // watchdogyt, mert ez a task fel van iratkozva ra.
+    esp_task_wdt_reset();
     vTaskDelay(pdMS_TO_TICKS(1));  // yield while polling for the next datagram
   }
 
@@ -313,6 +358,12 @@ void udpIOTask(void* params) {
   for (;;) {
     esp_task_wdt_reset();
 
+    // Stall-mero: a 2-3 mp-es hálózati kihagasok beazonositasahoz merjuk,
+    // melyik szakasz tart aul (RTCM fogadas, UART iras, UDP kuldés).
+    uint32_t iterStartMs = millis();
+    uint16_t rtcmBytes = 0;
+    uint16_t sentPkts = 0;
+
     // --- RTCM receive: poll the socket, forward every datagram to Serial2 ---
     int packetSize = rtcmUdp.parsePacket();
     if (packetSize > 0) {
@@ -322,7 +373,14 @@ void udpIOTask(void* params) {
         if (bytesRead <= 0) {
           break;
         }
+        uint32_t uartStartMs = millis();
         Serial2.write(rtcmBuffer, bytesRead);
+        uint32_t uartTook = millis() - uartStartMs;
+        if (uartTook > 50) {
+          DEBUG_PRINTF("[UDP] Serial2.write blocked %lu ms (%d bytes)\n",
+                       (unsigned long)uartTook, bytesRead);
+        }
+        rtcmBytes += bytesRead;
         packetSize -= bytesRead;
       }
     } else if (packetSize < 0) {
@@ -352,16 +410,32 @@ void udpIOTask(void* params) {
         bool success = false;
         // Unicast to the client IP with the fixed remote port
         // (udpRemotePort = 9999, AgOpenGPS always listens on this port).
-        if (udp.beginPacket(udpRemoteIP, udpRemotePort)) {
-          udp.write(packet.data, packet.length);
-          success = udp.endPacket();
+        // Sent on the dedicated TX socket - the RX socket (udp) is polled by
+        // the Core 1 UART_RX task and the WiFiUDP API is not thread-safe.
+        if (udpSend.beginPacket(udpRemoteIP, udpRemotePort)) {
+          udpSend.write(packet.data, packet.length);
+          uint32_t sendStartMs = millis();
+          success = udpSend.endPacket();
+          uint32_t sendTook = millis() - sendStartMs;
+          if (sendTook > 50) {
+            DEBUG_PRINTF("[UDP] endPacket blocked %lu ms (%d bytes)\n",
+                         (unsigned long)sendTook, packet.length);
+          }
         }
         if (!success && millis() - lastFailLogMs >= 5000) {
           lastFailLogMs = millis();
           DEBUG_PRINTF("[UDP] ERROR: Failed to send %d bytes to %s:%d\n",
                        packet.length, udpRemoteIP.toString().c_str(), udpRemotePort);
         }
+        sentPkts++;
       }
+    }
+
+    // Iteracio-ido riport: 2 ms a normal; >100 ms eseten valami blokkolt
+    uint32_t iterTook = millis() - iterStartMs;
+    if (iterTook > 100) {
+      DEBUG_PRINTF("[UDP] udpIO iter took %lu ms (rtcm=%u B, sent=%u pkt)\n",
+                   (unsigned long)iterTook, rtcmBytes, sentPkts);
     }
 
     // Fixed 2 ms poll: low RTCM latency without the former 1 kHz busy-polling

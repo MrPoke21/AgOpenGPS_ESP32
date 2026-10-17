@@ -17,24 +17,39 @@ bool isDebugEnabled() {
 }
 
 size_t DebugLogger::write(uint8_t c) {
-  if (!debugEnabled) return 1;
-  //Serial.write(c);
-  portENTER_CRITICAL(&logMux);
-  logBuf[totalWritten % LOG_BUF_SIZE] = (char)c;
-  totalWritten++;
-  portEXIT_CRITICAL(&logMux);
-  return 1;
+  return write(&c, 1);
 }
 
+// Timestamped ring-buffer write: every log line gets a "[ss.mmm] " prefix so
+// freezes can be correlated with the exact moment each line was emitted.
 size_t DebugLogger::write(const uint8_t* buffer, size_t size) {
   if (!debugEnabled) return size;
-  //Serial.write(buffer, size);
-  portENTER_CRITICAL(&logMux);
+  static bool atLineStart = true;
+
   for (size_t i = 0; i < size; i++) {
+    if (atLineStart) {
+      uint32_t ms = millis();
+      char pre[16];
+      int n = snprintf(pre, sizeof(pre), "[%lu.%03lu] ",
+                       (unsigned long)(ms / 1000UL), (unsigned long)(ms % 1000UL));
+      if (n > 0) {
+        portENTER_CRITICAL(&logMux);
+        for (int j = 0; j < n; j++) {
+          logBuf[totalWritten % LOG_BUF_SIZE] = pre[j];
+          totalWritten++;
+        }
+        portEXIT_CRITICAL(&logMux);
+      }
+      atLineStart = false;
+    }
+
+    portENTER_CRITICAL(&logMux);
     logBuf[totalWritten % LOG_BUF_SIZE] = (char)buffer[i];
     totalWritten++;
+    portEXIT_CRITICAL(&logMux);
+
+    if (buffer[i] == '\n') atLineStart = true;
   }
-  portEXIT_CRITICAL(&logMux);
   return size;
 }
 

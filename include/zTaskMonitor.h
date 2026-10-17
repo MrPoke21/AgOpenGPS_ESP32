@@ -26,6 +26,9 @@
  */
 void taskMonitorRegister(const char* name, TaskHandle_t handle);
 
+/** Textual name of the LAST reset reason (crash/WDT/brownout diagnosis) */
+const char* taskMonitorResetReason();
+
 /**
  * Append the task-monitor telemetry fields to a JSON object under
  * construction (called by the web UI /status handler). Appends
