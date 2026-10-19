@@ -141,7 +141,7 @@ Ez a csatorna minden beérkező UDP csomagot közvetlenül a `Serial2` kimenetre
 
 Ez a modul kapta a legtöbb egyedi fejlesztést ebben a firmware-ben:
 
-- `imuTask()` minden `loop()` iterációban lefut, és **egy `while` ciklusban teljesen kiüríti** a BNO08x jelentés-sorát (Adafruit_BNO08x könyvtár, `SH2_GAME_ROTATION_VECTOR`, 100 Hz mintavétel). Itt **nincs trigonometria** – csak a nyers kvaternion + időbélyeg (`sensorValue.timestamp`, µs, azonos időalap a `micros()`-szal) mentése történik `imuPrev`/`imuCurr`-ba.
+- `imuTask()` minden `loop()` iterációban lefut, és **egy `while` ciklusban teljesen kiüríti** a BNO08x jelentés-sorát (Adafruit_BNO08x könyvtár, `SH2_GAME_ROTATION_VECTOR`, 100 Hz mintavétel). Itt **nincs trigonometria** – csak a nyers kvaternion + időbélyeg mentése történik `imuPrev`/`imuCurr`-ba. Az időbélyeg a **fogadás pillanatában, host oldali `micros()`**: a vendég Adafruit_BNO08x könyvtár I2C HAL-ja (`i2chal_read()`) nem tölti ki a csomag-érkezési timestampot, ezért a `sensorValue.timestamp` szemét érték (≈0 vagy ≈2³²) – a chip saját időbélyegére nem támaszkodhatunk.
 - `GGA_Handler()` a GGA mondat feldolgozásának pontos pillanatában (`micros()`) hívja a `calculateIMU()`-t, amely:
   1. Kiugrás-szűrést végez (`2*acos(dot)` szögkülönbség vs. megengedett max. szögsebesség × eltelt idő) – ha a legutóbbi minta fizikailag valószínűtlen ugrást mutat, visszaesik az előző mintára.
   2. **SLERP interpolációval/extrapolációval** (gömbi lineáris interpoláció) kiszámítja, milyen orientáció lett volna *pontosan* a GPS-fix pillanatában, a két legutóbbi IMU-minta között.

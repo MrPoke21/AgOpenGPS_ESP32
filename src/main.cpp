@@ -104,6 +104,11 @@ void setup() {
   Serial.setRxFIFOFull(32);
   Serial.begin(115200);
   */
+  // RX buffer: the ESP32 Arduino default is 256 B = only ~22 ms of headroom at
+  // 115200 baud. A single slow loop() iteration (I2C hiccup on the shared Wire
+  // bus, flash write, WiFi event) then drops GPS bytes and the NMEA parser has
+  // to resync mid-sentence. 2048 B = ~180 ms of buffering, trivial heap cost.
+  Serial2.setRxBufferSize(2048);  // RX
   Serial2.setTxBufferSize(4096);  // TX
   Serial2.begin(115200, SERIAL_8N1, 16, 17);
   delay(500);
