@@ -32,6 +32,46 @@ QueueHandle_t udpSendQueue = NULL;
 // Forward declaration - defined at the end of this file
 void wifiMonitorTask(void* params);
 
+// Automatic AP channel: scans the non-overlapping 2.4 GHz channels 1/6/11 and
+// returns the one with the least interference. Score per channel = number of
+// networks seen on it + the sum of their signal strength, weighted by RSSI
+// (a strong neighbour hurts more than a weak one). Runs once per boot, before
+// the AP is started. Returns 6 if the scan fails, so there is always a channel.
+static uint8_t pickLeastCongestedChannel() {
+  static const uint8_t candidates[3] = { 1, 6, 11 };
+  int32_t score[3] = { 0, 0, 0 };
+
+  int found = WiFi.scanNetworks(false, false, false, 300);
+  if (found < 0) {
+    DEBUG_PRINTLN("[UDP] Channel scan failed - using channel 6");
+    WiFi.scanDelete();
+    return 6;
+  }
+
+  for (int i = 0; i < found; i++) {
+    int ch = WiFi.channel(i);
+    int32_t rssi = WiFi.RSSI(i);  // negative dBm, e.g. -40 strong, -90 weak
+    for (uint8_t c = 0; c < 3; c++) {
+      if (ch == candidates[c]) {
+        // Map RSSI (-100..-30 dBm) to a 0..70 weight: stronger = more interference
+        int32_t weight = rssi + 100;
+        if (weight < 0) weight = 0;
+        if (weight > 70) weight = 70;
+        score[c] += 1 + weight;
+      }
+    }
+  }
+  WiFi.scanDelete();
+
+  uint8_t best = 0;
+  for (uint8_t c = 1; c < 3; c++) {
+    if (score[c] < score[best]) best = c;
+  }
+  DEBUG_PRINTF("[UDP] Channel scores: ch1=%ld ch6=%ld ch11=%ld (networks=%d)\n",
+               (long)score[0], (long)score[1], (long)score[2], found);
+  return candidates[best];
+}
+
 // Creates the send queue up front so it's never NULL once any task can reach it
 void initUDPQueues() {
   if (udpSendQueue == NULL) {
@@ -72,8 +112,14 @@ bool initWiFi() {
   if (wifiRuntimeConfig.mode == 1) {
     // AP Mode - create access point (lower latency)
     DEBUG_PRINTLN("[UDP] Starting WiFi Access Point (Lower Latency)");
+    // Automatic channel: scan the surrounding networks once and pick the least
+    // congested of the non-overlapping channels 1/6/11. scanNetworks() needs the
+    // STA driver, so the scan runs in AP+STA and the AP is started afterwards.
+    WiFi.mode(WIFI_AP_STA);
+    uint8_t apChannel = pickLeastCongestedChannel();
     WiFi.mode(WIFI_AP);
-    WiFi.softAP(wifiRuntimeConfig.apSsid, wifiRuntimeConfig.apPass);
+    WiFi.softAP(wifiRuntimeConfig.apSsid, wifiRuntimeConfig.apPass, apChannel);
+    DEBUG_PRINTF("[UDP] AP channel auto-selected: %u\n", (unsigned)apChannel);
 
     // Power save can only be applied once the WiFi driver is actually running -
     // calling this before WiFi.mode()/softAP() is a silent no-op (driver not init yet)

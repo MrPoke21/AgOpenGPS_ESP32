@@ -15,7 +15,7 @@ struct WiFiRuntimeConfig {
   char staSsid[33];
   char staPass[64];
   uint16_t udpPort;
-  uint8_t channel;       // AP WiFi channel (1-13) - lets the user dodge local congestion
+  uint8_t reserved_ch;   // unused since the automatic AP channel selection (kept for EEPROM layout)
 };
 
 extern WiFiRuntimeConfig wifiRuntimeConfig;

@@ -53,7 +53,7 @@ void loadWiFiRuntimeConfig() {
   copyBounded(wifiRuntimeConfig.staSsid, sizeof(wifiRuntimeConfig.staSsid), WIFI_SSID);
   copyBounded(wifiRuntimeConfig.staPass, sizeof(wifiRuntimeConfig.staPass), WIFI_PASS);
   wifiRuntimeConfig.udpPort = UDP_PORT;
-  wifiRuntimeConfig.channel = WIFI_CHANNEL;
+  wifiRuntimeConfig.reserved_ch = 0;
 
   // Defensive: a main.cpp autosteerSetup()-ja mar meghivta a EEPROM.begin(EEPROM_SIZE)-t,
   // igy ez csak akkor csinal valami, ha a hivasi sorrend valtozna.
@@ -68,10 +68,10 @@ void loadWiFiRuntimeConfig() {
     copyBounded(wifiRuntimeConfig.staSsid, sizeof(wifiRuntimeConfig.staSsid), block.cfg.staSsid);
     copyBounded(wifiRuntimeConfig.staPass, sizeof(wifiRuntimeConfig.staPass), block.cfg.staPass);
     wifiRuntimeConfig.udpPort = block.cfg.udpPort;
-    wifiRuntimeConfig.channel = block.cfg.channel;
-    DEBUG_PRINTF("[WIFI] EEPROM konfig betoltve: mode=%u apSsid=\"%s\" staSsid=\"%s\" udp=%u ch=%u\n",
+    wifiRuntimeConfig.reserved_ch = 0;  // channel is chosen automatically; stored byte ignored
+    DEBUG_PRINTF("[WIFI] EEPROM konfig betoltve: mode=%u apSsid=\"%s\" staSsid=\"%s\" udp=%u\n",
                  wifiRuntimeConfig.mode, wifiRuntimeConfig.apSsid, wifiRuntimeConfig.staSsid,
-                 wifiRuntimeConfig.udpPort, wifiRuntimeConfig.channel);
+                 wifiRuntimeConfig.udpPort);
   } else {
     // Elso boot (vagy serult blokk) - az alapertekek rogzitese az EEPROM-ba
     DEBUG_PRINTLN("[WIFI] EEPROM ures/ervenytelen WiFi blokk (elso boot) - alapertekek rogzitese");
@@ -103,13 +103,12 @@ bool saveWiFiRuntimeConfig() {
             strcmp(check.cfg.apPass, wifiRuntimeConfig.apPass) == 0 &&
             strcmp(check.cfg.staSsid, wifiRuntimeConfig.staSsid) == 0 &&
             strcmp(check.cfg.staPass, wifiRuntimeConfig.staPass) == 0 &&
-            check.cfg.udpPort == wifiRuntimeConfig.udpPort &&
-            check.cfg.channel == wifiRuntimeConfig.channel;
+            check.cfg.udpPort == wifiRuntimeConfig.udpPort;
 
   if (ok) {
-    DEBUG_PRINTF("[WIFI] Beallitasok mentve es ellenorizve (EEPROM OK): mode=%u apSsid=\"%s\" staSsid=\"%s\" udp=%u ch=%u\n",
+    DEBUG_PRINTF("[WIFI] Beallitasok mentve es ellenorizve (EEPROM OK): mode=%u apSsid=\"%s\" staSsid=\"%s\" udp=%u\n",
                  wifiRuntimeConfig.mode, wifiRuntimeConfig.apSsid, wifiRuntimeConfig.staSsid,
-                 wifiRuntimeConfig.udpPort, wifiRuntimeConfig.channel);
+                 wifiRuntimeConfig.udpPort);
   } else {
     DEBUG_PRINTLN("[WIFI] HIBA: a mentett EEPROM blokk visszaolvasasa nem egyezik - a mentes NEM tortent meg!");
     return false;
@@ -128,15 +127,6 @@ static String htmlEscape(const char* s) {
       case '"':  out += "&quot;"; break;
       default:   out += *p;
     }
-  }
-  return out;
-}
-
-static String channelOptions(uint8_t selected) {
-  String out;
-  for (uint8_t ch = 1; ch <= 13; ch++) {
-    out += "<option value='" + String(ch) + "'" + (ch == selected ? " selected" : "") + ">" + String(ch) +
-           ((ch == 1 || ch == 6 || ch == 11) ? " (ajanlott)" : "") + "</option>";
   }
   return out;
 }
@@ -292,7 +282,6 @@ static void handleRoot() {
     "<fieldset><legend>Access Point beallitasok</legend>"
     "<label>SSID<input type='text' name='ap_ssid' maxlength='32' value='" + htmlEscape(wifiRuntimeConfig.apSsid) + "'></label>"
     "<label>Jelszo<input type='password' name='ap_pass' maxlength='63' value='" + htmlEscape(wifiRuntimeConfig.apPass) + "'></label>"
-    "<label>WiFi csatorna (utkozes eseten probalj masikat)<select name='channel'>" + channelOptions(wifiRuntimeConfig.channel) + "</select></label>"
     "</fieldset>"
     "<fieldset><legend>Kliens (STA) beallitasok</legend>"
     "<label>SSID<input type='text' name='sta_ssid' maxlength='32' value='" + htmlEscape(wifiRuntimeConfig.staSsid) + "'></label>"
@@ -561,9 +550,6 @@ static void handleSave() {
 
   long port = configServer.arg("udp_port").toInt();
   wifiRuntimeConfig.udpPort = (port >= 1 && port <= 65535) ? (uint16_t)port : UDP_PORT;
-
-  long channel = configServer.arg("channel").toInt();
-  wifiRuntimeConfig.channel = (channel >= 1 && channel <= 13) ? (uint8_t)channel : WIFI_CHANNEL;
 
   bool saved = saveWiFiRuntimeConfig();
 

@@ -99,7 +99,6 @@ Az alapértékek az [include/Configuration.h](include/Configuration.h) fájlban 
 | `WIFI_MODE` | `1` | `1` = AP mód, `0` = STA mód |
 | `WIFI_SSID` | `AGOPEN_ESP32_AP` | Alap AP SSID és kezdeti STA SSID |
 | `WIFI_PASS` | `12345678` | Alap AP jelszó és kezdeti STA jelszó |
-| `WIFI_CHANNEL` | `6` | AP mód WiFi csatornája, 1–13 |
 | `UDP_PORT` | `8888` | AgOpenGPS adatkommunikáció UDP portja |
 | `WEB_SERVER_PORT` | `80` | Webes konfigurációs oldal portja |
 

@@ -134,9 +134,8 @@
 /** Default WiFi Access Point / Station password (max 63 characters) */
 #define WIFI_PASS "12345678"
 
-/** Default AP WiFi channel (1-13). 2.4GHz non-overlapping channels: 1, 6, 11.
- *  Runtime-changeable via the web UI to work around local channel congestion. */
-#define WIFI_CHANNEL 6
+/** AP WiFi channel is selected automatically at boot (scan of 1/6/11, least
+ *  congested). There is no manual channel setting. */
 
 /** UDP broadcast IP address for STA mode */
 #define BROADCAST_IP "192.168.0.255"
