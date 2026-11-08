@@ -2,6 +2,7 @@
 #include <main.h>
 #include <zAutosteer.h>
 #include <zInput.h>
+#include <zSteerGuard.h>
 #include <zUDP.h>
 #include <AutosteerPID.h>
 
@@ -72,7 +73,23 @@ void autosteerLoop() {
   inputHandler();
 
   calcSteerAngle();
-  
+
+  // WAS-stale watchdog: no valid steering sample for WAS_STALE_MS -> PWM off.
+  // The guard only disables the output; it never enables it. Recovery is
+  // soft-started by wasGuardRamp() below.
+  WasGuard &wasG = wasSteerGuard();
+  uint32_t lastValid = adcLastSteerValidMs();
+  if (!wasG.hasValid || lastValid != wasG.lastValidMs) {
+    wasGuardOnValid(wasG, lastValid);  // a new plausible sample arrived
+  }
+  bool wasAllowed = wasGuardUpdate(wasG, millis(), WAS_STALE_MS);
+  if (!wasAllowed) {
+    if (steerEnable) {
+      DEBUG_PRINTLN("[SAFETY] WAS stale - PWM kikapcsolva");
+    }
+    steerEnable = false;
+  }
+
   // Handle motor on/off state safely (only transitions once)
   motorStateControl();
   

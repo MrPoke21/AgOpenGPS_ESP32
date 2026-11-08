@@ -6,6 +6,7 @@
 #include "zNMEAParser.h"
 #include <Arduino.h>
 #include <zInput.h>
+#include <zI2CBus.h>
 #include <zHandlers.h>
 #include <zPackets.h>
 #include <zAutosteer.h>
@@ -114,9 +115,8 @@ void setup() {
   delay(500);
   
   //set up communication
-  Wire.setBufferSize(128);
-  Wire.begin();
-  Wire.setClock(400000);
+  // Shared I2C bus (IMU + ADC): mutex, clock and transaction timeout (zI2CBus.cpp)
+  i2cBusInit();
   delay(500);
   autosteerSetup();
   initTaskMonitor();  // Task/heap supervisor + TWDT init (must run before task creation)

@@ -18,7 +18,7 @@
 // if not in eeprom, overwrite
 // 2501: bumped for the PgnBuilder settings migration - the SteerSettingsData /
 // SteerConfigData EEPROM layout changed, old stored bytes would decode as garbage
-#define EEP_Ident 2501
+#define EEP_Ident 2502
 
 //   ***********  Motor drive connections  **************888
 //Connect ground only for cytron, Connect Ground and +5v for IBT2

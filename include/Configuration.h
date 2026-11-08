@@ -101,6 +101,12 @@
 /** UDP buffer size - max packet size in bytes */
 #define UDP_BUFFER_SIZE 1024
 
+/** RX stall watchdog: if a known client exists but no UDP datagram has arrived for
+ *  this long, the RX socket is closed and reopened on the same port (ms).
+ *  AgIO sends at ~5-10 Hz (gaps of 0.1-0.3 s are normal), so 500 ms is only a few
+ *  missed packets. Every reopen closes the socket briefly and can drop a datagram. */
+#define UDP_RX_STALL_MS 500
+
 /** WiFi TX Power (dBm): 8=7dBm, 20=20dBm, 78=20.5dBm (maximum) */
 #define WIFI_TX_POWER 78
 
@@ -169,3 +175,33 @@
 #define SPEED_IMPULSE_ENABLED       //  Uncomment to enable speed impulse output
 #define IMPULSE_PIN 25              // GPIO pin for the impulse output
 #define PULSES_PER_METER 10         // Pulses per meter
+
+// ==================== SHARED I2C BUS (BNO08x IMU + ADS1115 ADC) ====================
+/** I2C clock in Hz. 100 kHz is the conservative default for the shared bus. */
+#define I2C_CLOCK_HZ 100000
+/** Per-transaction timeout of the Wire driver (ms). */
+#define I2C_TRANSACTION_TIMEOUT_MS 10
+/** Max time a task may wait for the shared-bus mutex (ms). Longer = skip this cycle.
+ *  Must exceed the longest single BNO transaction (measured max ~8.5 ms), otherwise
+ *  the ADC task times out on every IMU read. The ADC holds the bus only ~0.5 ms
+ *  per phase, so this does not delay the loop() path noticeably. */
+#define I2C_MUTEX_TIMEOUT_MS 20
+/** ADS1115 I2C address (ADDR pin to GND). Also the address the IMU scan must avoid. */
+#define ADS1115_I2C_ADDR 0x48
+/** Number of consecutive failed ADC transactions before the ADC is logged as failing. */
+#define ADC_FAIL_LOG_EVERY 50
+/** The current/pressure channel is read every N-th ADC cycle (1 = every cycle).
+ *  The WAS (steering) channel is read in every cycle. Saves one ~2-4 ms bus
+ *  transaction per skipped cycle. */
+#define ADC_CURRENT_READ_DIVIDER 2
+/** Max plausible change of the WAS raw count between two valid ADC samples (counts). */
+#define ADC_WAS_MAX_STEP_COUNTS 1500
+/** Valid range of the WAS raw count (16-bit signed ADC, positive half). */
+#define ADC_WAS_MIN_COUNTS 0
+#define ADC_WAS_MAX_COUNTS 32767
+
+// ==================== STEERING INPUT SAFETY ====================
+/** If no valid steering-angle sample arrives for this long, the PWM output is disabled. */
+#define WAS_STALE_MS 100
+/** Soft-start ramp after a valid sample returns: PWM limit grows by this much per control tick. */
+#define WAS_SOFTSTART_STEP 8

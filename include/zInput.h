@@ -38,6 +38,16 @@ extern int16_t filteredSteeringSensor;
 extern int16_t filteredCurrentSensor;
 extern int16_t current_zero;
 
+// Steering-input safety (see zSteerGuard.h). Written by the ADC task, read in loop().
+uint32_t adcLastSteerValidMs();  // millis() of the last plausible WAS sample
+uint32_t adcFailCount();         // failed ADS1115 transactions (lifetime)
+uint32_t adcFailMutex();         // ... of which: bus mutex timeout
+uint32_t adcFailNotReady();      // ... of which: conversion not ready in time
+uint32_t adcFailBus();           // ... of which: NACK / timeout / short read
+uint32_t adcRetryOk();           // not-ready at first read, OK after the retry
+struct WasGuard;
+WasGuard &wasSteerGuard();       // WAS-stale watchdog + soft-start state
+
 void calcSteerAngle();
 void inputHandler();
 void initInput();

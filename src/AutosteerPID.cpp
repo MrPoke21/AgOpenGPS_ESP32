@@ -1,6 +1,8 @@
 
 #include <AutosteerPID.h>
 #include <Configuration.h>
+#include <zInput.h>
+#include <zSteerGuard.h>
 #include <algorithm>
 
 static bool motorWasEnabled = false;
@@ -167,6 +169,12 @@ void calcSteeringPID(void) {
   if (pwmDrive < -newMax) pwmDrive = -newMax;
 
   if (steerConfig.motorDriveDirection) pwmDrive *= -1;
+
+  // Soft start after a WAS-stale recovery: limit |PWM| by a ramp that grows
+  // from 0 (zSteerGuard.h). Only lowers the output, never raises it.
+  int16_t rampLimit = wasGuardRamp(wasSteerGuard(), 255, WAS_SOFTSTART_STEP);
+  if (pwmDrive > rampLimit) pwmDrive = rampLimit;
+  if (pwmDrive < -rampLimit) pwmDrive = -rampLimit;
 
   motorDrive();
 }

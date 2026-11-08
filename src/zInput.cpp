@@ -1,6 +1,9 @@
 #include <Configuration.h>
 #include "zTaskMonitor.h"
 #include <zInput.h>
+#include <zI2CBus.h>
+#include <zSteerGuard.h>
+#include <Wire.h>
 #include <freertos/semphr.h>
 
 int16_t steeringPosition = 0;
@@ -37,6 +40,116 @@ static int16_t computeMedian(const int16_t* buf) {
     tmp[j + 1] = key;
   }
   return tmp[ADC_MEDIAN_FILTER_SIZE / 2];
+}
+
+// ── Bounded ADS1115 reader ─────────────────────────────────────────────────
+// The Adafruit library's readADC_SingleEnded() spins forever on
+// conversionComplete() and reports no bus error, so the ADC task could hang on
+// a stuck bus. This reader does the same single-shot conversion (same config
+// bits as the library: single-shot, 860 SPS, +/-6.144 V) with explicit
+// endTransmission() checks and a bounded poll for the conversion-ready bit.
+static uint32_t adcIoErrors = 0;        // failed transactions (lifetime)
+static AdcPlausibility steerPlaus = {0, false, 0};
+static AdcPlausibility currentPlaus = {0, false, 0};
+static int16_t lastGoodSteerRaw = 0;
+static int16_t lastGoodCurrentRaw = 0;
+static uint32_t steerValidMs = 0;      // millis() of the last plausible WAS sample
+static WasGuard wasGuard = {0, false, false, 0, 0};
+
+static bool adsWriteReg(uint8_t reg, uint16_t value) {
+  Wire.beginTransmission(ADS1115_I2C_ADDR);
+  Wire.write(reg);
+  Wire.write((uint8_t)(value >> 8));
+  Wire.write((uint8_t)(value & 0xFF));
+  return Wire.endTransmission() == 0;
+}
+
+static bool adsReadReg(uint8_t reg, uint16_t &out) {
+  Wire.beginTransmission(ADS1115_I2C_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom((uint8_t)ADS1115_I2C_ADDR, (uint8_t)2) != 2) return false;
+  uint8_t hi = Wire.read();
+  uint8_t lo = Wire.read();
+  out = ((uint16_t)hi << 8) | lo;
+  return true;
+}
+
+// Return codes of adsReadChannelBounded(), counted separately in the health line.
+enum AdsResult : uint8_t {
+  ADS_OK = 0,
+  ADS_ERR_MUTEX = 1,   // bus busy: mutex not obtained within I2C_MUTEX_TIMEOUT_MS
+  ADS_ERR_NOT_READY = 2,  // conversion not finished within the bounded poll
+  ADS_ERR_BUS = 3,     // NACK / timeout / short read
+};
+static uint32_t adcErrMutex = 0, adcErrNotReady = 0, adcErrBus = 0;
+static uint8_t adcCycleCount = 0;        // ADC cycle counter (current-channel divider)
+static uint32_t adcRetryRecovered = 0;   // not-ready at first read, OK after the retry
+static uint16_t adcLastNotReadyCfg = 0;  // raw CONFIG register of the last not-ready read
+
+// Two-phase read so the bus mutex is NOT held during the ~1.2 ms conversion:
+//   phase 1 (locked): write the config, which starts the single-shot conversion
+//   wait (unlocked):  vTaskDelay, so the IMU can use the bus meanwhile
+//   phase 2 (locked): check the OS/ready bit once, then read the result
+// The ready check is a single read, not a poll, so the locked time stays short.
+static const TickType_t ADS_CONVERSION_WAIT_TICKS = pdMS_TO_TICKS(2);  // >= 1.2 ms conversion at 860 SPS
+
+static AdsResult adsReadChannelBounded(uint8_t channel, int16_t &out) {
+  if (channel > 3) return ADS_ERR_BUS;
+
+  // Phase 1: start the conversion (locked, short)
+  if (!i2cBusLock()) {
+    adcErrMutex++;
+    return ADS_ERR_MUTEX;
+  }
+  uint32_t t0 = micros();
+  // Same bits as Adafruit_ADS1X15::startADCReading() for single-shot mode.
+  uint16_t config = ADS1X15_REG_CONFIG_CQUE_1CONV | ADS1X15_REG_CONFIG_CLAT_NONLAT |
+                    ADS1X15_REG_CONFIG_CPOL_ACTVLOW | ADS1X15_REG_CONFIG_CMODE_TRAD |
+                    ADS1X15_REG_CONFIG_MODE_SINGLE | GAIN_TWOTHIRDS | RATE_ADS1115_860SPS |
+                    MUX_BY_CHANNEL[channel] | ADS1X15_REG_CONFIG_OS_SINGLE;
+  bool busOk = adsWriteReg(ADS1X15_REG_POINTER_CONFIG, config);
+  i2cBusUnlock();
+  if (!busOk) {
+    adcErrBus++;
+    return ADS_ERR_BUS;
+  }
+
+  // Wait for the conversion without holding the bus (task yields, not spins)
+  vTaskDelay(ADS_CONVERSION_WAIT_TICKS);
+
+  // Phase 2: read the result. One retry after another unlocked wait covers a
+  // conversion that finishes late. The bus is locked only for each read.
+  uint16_t raw = 0;
+  AdsResult result = ADS_ERR_NOT_READY;
+  for (uint8_t attempt = 0; attempt < 2 && result == ADS_ERR_NOT_READY; attempt++) {
+    if (attempt > 0) {
+      vTaskDelay(ADS_CONVERSION_WAIT_TICKS);  // unlocked
+    }
+    if (!i2cBusLock()) {
+      adcErrMutex++;
+      return ADS_ERR_MUTEX;
+    }
+    uint16_t cfg = 0;
+    if (!adsReadReg(ADS1X15_REG_POINTER_CONFIG, cfg)) {
+      result = ADS_ERR_BUS;
+    } else if ((cfg & 0x8000) == 0) {
+      result = ADS_ERR_NOT_READY;  // OS bit 0 = conversion still running
+      adcLastNotReadyCfg = cfg;
+    } else if (!adsReadReg(ADS1X15_REG_POINTER_CONVERT, raw)) {
+      result = ADS_ERR_BUS;
+    } else {
+      result = ADS_OK;
+      if (attempt > 0) adcRetryRecovered++;
+    }
+    i2cBusUnlock();
+  }
+  i2cBusRecordAdc((uint32_t)(micros() - t0));
+  if (result == ADS_ERR_BUS) adcErrBus++;
+  if (result == ADS_ERR_NOT_READY) adcErrNotReady++;
+  if (result != ADS_OK) return result;
+  out = (int16_t)raw;  // ADS1115 is 16-bit: no shift needed
+  return ADS_OK;
 }
 
 // Forward declarations
@@ -199,9 +312,46 @@ void adcTaskFunction(void* parameter) {
     if (currentTime - lastReadTime >= ADC_READ_INTERVAL_MS) {
       lastReadTime = currentTime;
       
-      // Read both ADC channels (blocking I2C, but in background task)
-      int16_t rawSteer = adc.readADC_SingleEnded(ADC_CHANNEL_STEER);
-      int16_t rawCurrent = adc.readADC_SingleEnded(ADC_CHANNEL_SENSOR);
+      // Read both ADC channels through the bounded, mutex-protected reader.
+      // A failed transaction returns false and keeps the last good value.
+      int16_t rawSteer = lastGoodSteerRaw;
+      int16_t rawCurrent = lastGoodCurrentRaw;
+      // WAS: every cycle. Current/pressure: every ADC_CURRENT_READ_DIVIDER cycles.
+      bool readCurrentThisCycle = (adcCycleCount % ADC_CURRENT_READ_DIVIDER) == 0;
+      adcCycleCount++;
+      bool okSteer = (adsReadChannelBounded(ADC_CHANNEL_STEER, rawSteer) == ADS_OK);
+      bool okCurrent = true;  // not read on skipped cycles: not a failure
+      if (readCurrentThisCycle) {
+        okCurrent = (adsReadChannelBounded(ADC_CHANNEL_SENSOR, rawCurrent) == ADS_OK);
+      }
+      if (!okSteer || !okCurrent) {
+        adcIoErrors++;
+        if (adcIoErrors % ADC_FAIL_LOG_EVERY == 1) {
+          DEBUG_PRINTF("[ADC] I2C fail #%lu (steer=%d current=%d) mutex=%lu notReady=%lu bus=%lu "
+                       "retryOk=%lu lastCfg=0x%04X\n",
+                       (unsigned long)adcIoErrors, okSteer, okCurrent,
+                       (unsigned long)adcErrMutex, (unsigned long)adcErrNotReady,
+                       (unsigned long)adcErrBus, (unsigned long)adcRetryRecovered,
+                       (unsigned)adcLastNotReadyCfg);
+        }
+      }
+      // Steering: range + step plausibility. Current/pressure: range only
+      // (its legitimate changes can be fast, the median stage handles spikes).
+      if (okSteer && adcSampleAccept(steerPlaus, rawSteer, ADC_WAS_MIN_COUNTS,
+                                     ADC_WAS_MAX_COUNTS, ADC_WAS_MAX_STEP_COUNTS)) {
+        lastGoodSteerRaw = rawSteer;
+        steerValidMs = millis();  // read by loop() via adcLastSteerValidMs()
+      } else {
+        rawSteer = lastGoodSteerRaw;  // failed or implausible: keep last good
+      }
+      if (readCurrentThisCycle) {
+        if (okCurrent && adcSampleAccept(currentPlaus, rawCurrent, ADC_WAS_MIN_COUNTS,
+                                         ADC_WAS_MAX_COUNTS, ADC_WAS_MAX_COUNTS)) {
+          lastGoodCurrentRaw = rawCurrent;
+        } else {
+          rawCurrent = lastGoodCurrentRaw;
+        }
+      }
 
       // --- Stage 1: Median filter (spike rejection) ---
       // Store new samples in circular buffer, then take the middle value.
@@ -228,6 +378,16 @@ void adcTaskFunction(void* parameter) {
     vTaskDelay(pdMS_TO_TICKS(1));  // Prevent task starvation, short sleep
   }
 }
+
+// Steering-input safety accessors (called from loop() / autosteerLoop()).
+// The ADC task only writes steerValidMs and adcIoErrors; loop() reads them.
+uint32_t adcLastSteerValidMs() { return steerValidMs; }
+uint32_t adcFailCount() { return adcIoErrors; }
+uint32_t adcFailMutex() { return adcErrMutex; }
+uint32_t adcFailNotReady() { return adcErrNotReady; }
+uint32_t adcFailBus() { return adcErrBus; }
+uint32_t adcRetryOk() { return adcRetryRecovered; }
+WasGuard &wasSteerGuard() { return wasGuard; }
 
 // Non-blocking helper (stub for profiling, actual work is in adcTaskFunction)
 void updateADCCacheAsync() {

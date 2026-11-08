@@ -264,6 +264,14 @@ void sendNMEA(const uint8_t* data, uint16_t length) {
 }
 
 // ===== RECEIVE UDP DATA (polls WiFiUDP, blocks until a packet arrives) ======
+// RX stall watchdog state (receiveUDP runs only in the UART_RX task, so this
+// is single-writer). rxReopenCount is the lifetime number of socket reopens.
+static uint32_t lastRxMs = 0;
+static uint32_t rxReopenCount = 0;
+// true once a datagram arrived after the last reopen. The watchdog reopens at
+// most once per silence: a long AgIO pause does not cause a reopen every 0.5 s.
+static bool rxSinceReopen = true;
+
 uint16_t receiveUDP(uint8_t* buffer, uint16_t maxLen) {
   int packetSize;
   while (!udpSocketReady) {
@@ -278,8 +286,21 @@ uint16_t receiveUDP(uint8_t* buffer, uint16_t maxLen) {
     // Csomagra varas - ez a normal allapot (AgIO csendje), etetni kell a
     // watchdogyt, mert ez a task fel van iratkozva ra.
     esp_task_wdt_reset();
+    // RX silence: logged only, the socket is NOT reopened here. stop()/begin()
+    // drops every datagram queued in the lwIP receive mailbox (only 6 deep), so
+    // the old reopen-on-silence caused the packet loss it was meant to fix.
+    // Logged once per silence (rxSinceReopen gates it).
+    if (udpClientConnected && rxSinceReopen &&
+        (uint32_t)((uint32_t)millis() - lastRxMs) > UDP_RX_STALL_MS) {
+      rxSinceReopen = false;
+      rxReopenCount++;
+      DEBUG_PRINTF("[UDP] RX silence >%u ms (#%lu) - socket kept open\n",
+                   (unsigned)UDP_RX_STALL_MS, (unsigned long)rxReopenCount);
+    }
     vTaskDelay(pdMS_TO_TICKS(1));  // yield while polling for the next datagram
   }
+  lastRxMs = (uint32_t)millis();
+  rxSinceReopen = true;
 
   // Learn the client IP for the replies. The remote port is FIXED
   // (udpRemotePort = 9999 - AgOpenGPS always sends from this port), so only
@@ -295,6 +316,14 @@ uint16_t receiveUDP(uint8_t* buffer, uint16_t maxLen) {
   }
 
   int len = udp.read(buffer, maxLen);
+
+  // Datagram source for sizes that are not AgIO packets (9/12/14/30 B). The
+  // 373 B and 970 B datagrams seen in the logs look like RTCM; this shows which
+  // sender and port they come from.
+  if (len > 0 && len != 9 && len != 12 && len != 14 && len != 30) {
+    DEBUG_PRINTF("[UDP] Non-AgIO datagram: %d B from %s:%u\n", len,
+                 senderIP.toString().c_str(), (unsigned)udp.remotePort());
+  }
   return (len > 0) ? (uint16_t)len : 0;
 }
 

@@ -1,6 +1,10 @@
 #include <Configuration.h>
 #include <zHandlers.h>
 #include <zUDP.h>
+#include <zImuLogic.h>
+#include <zI2CBus.h>
+#include <zInput.h>
+#include <zSteerGuard.h>
 #ifdef SPEED_IMPULSE_ENABLED
   #include <zSpeedImpulse.h>
 #endif
@@ -65,6 +69,31 @@ const float IMU_QUAT_NORMSQ_MAX = 2.0f;
 // imuTask()/main.cpp), so this just needs to comfortably exceed the 10Hz
 // GPS rate; it is not the reason for the old stuttering.
 const uint32_t IMU_REPORT_INTERVAL_US = 10000;
+
+// ── Software recovery / robustness tuning (no hardware RST/INT wired) ───────
+// Status-0 (fusion "unreliable") samples are dropped only for runs shorter than
+// this grace period; a longer run is accepted and logged.
+const uint32_t IMU_STATUS0_GRACE_MS = 1500;
+// If the newest accepted sample is older than this, the IMU is treated as
+// stalled: PANDA heading/roll are sent as 0 ("no IMU" - the value the code
+// sends when useBNO08x is false) and recovery is attempted.
+const uint32_t IMU_STALE_MS = 250;
+// Recovery retry waits (non-blocking, grows per failed attempt).
+const uint32_t IMU_RECOVERY_BACKOFF_MS[] = { 1000, 2000, 5000, 10000 };
+const uint8_t IMU_RECOVERY_BACKOFF_STEPS = sizeof(IMU_RECOVERY_BACKOFF_MS) / sizeof(IMU_RECOVERY_BACKOFF_MS[0]);
+// Max samples collected per drain pass for batch-timestamp assignment.
+const uint8_t IMU_BATCH_MAX = 8;
+// Interval between getSensorEvent() drains (I2C polling reduction).
+const uint32_t IMU_POLL_INTERVAL_US = 2000;
+
+// Yaw continuity state (raw yaw re-based after a sensor reset, offset lives
+// until the next reset). Written only from loop context.
+static ImuYawContinuity imuYaw = { 0.0f, 0.0f, false, false };
+static ImuStatusGate imuStatusGate0 = { true, false, 0 };
+static uint32_t imuResetCount = 0;
+static uint32_t imuRecoveryAttempts = 0;
+static uint32_t imuStatus0GraceEvents = 0;
+static uint8_t imuMaxBatch = 0;
 
 // ── IMU health counters (reported by imuTask once per 10 s) ──────────────────
 // These decide the "no IMU data" question in a single log line:
@@ -328,6 +357,8 @@ void quaternionToEuler(float qr, float qi, float qj, float qk) {
   if (ypr.yaw < 0) {
     ypr.yaw += 360;
   }
+  // Raw yaw -> published yaw (re-based after a sensor reset, see zImuLogic.h).
+  ypr.yaw = imuYawApply(imuYaw, ypr.yaw);
   ypr.pitch *= RAD_TO_DEG;
   ypr.roll *= RAD_TO_DEG;
 
@@ -356,13 +387,118 @@ void setReports() {
   }
 }
 
+// IMU bus recovery now lives in zI2CBus.cpp (i2cBusRecover), shared with the ADC.
+
+// Non-blocking recovery state machine, advanced from imuTask() only.
+// Each attempt: (a) bus reset, (b) begin_I2C, (c) setReports. The wait before
+// attempt k is IMU_RECOVERY_BACKOFF_MS[k] (1 s, 2 s, 5 s, then 10 s).
+static uint32_t imuRecoverNotBeforeMs = 0;
+static uint8_t imuRecoverAttemptIdx = 0;
+static bool imuRecovering = false;
+
+static void imuRecoveryStep() {
+  uint32_t nowMs = millis();
+  if (!imuRecovering) {
+    imuRecovering = true;
+    imuRecoverNotBeforeMs = nowMs;  // first attempt immediately
+  }
+  if ((int32_t)(nowMs - imuRecoverNotBeforeMs) < 0) {
+    return;  // still waiting for the backoff
+  }
+  imuRecoveryAttempts++;
+  DEBUG_PRINTF("[IMU] helyreallitas #%lu (kiserlet %u)\n",
+               (unsigned long)imuRecoveryAttempts, (unsigned)imuRecoverAttemptIdx + 1);
+  i2cBusRecover();  // central bus reset, under the shared-bus mutex (zI2CBus.cpp)
+  if (!i2cBusLock()) {
+    // Bus busy: retry on the next backoff step instead of blocking here.
+    imuRecoverNotBeforeMs = millis() + IMU_RECOVERY_BACKOFF_MS[0];
+    return;
+  }
+  bool ok = bno08x.begin_I2C(bno08xAddress);
+  if (ok) {
+    setReports();  // still under the bus mutex: this is an I2C transaction too
+  }
+  i2cBusUnlock();
+  if (ok) {
+    imuRecovering = false;
+    imuRecoverAttemptIdx = 0;
+    imuCurr.valid = false;  // reference is new after re-init
+    imuPrev.valid = false;
+    imuYawOnReset(imuYaw);  // raw yaw restarts: re-base to the last published yaw
+    DEBUG_PRINTLN("[IMU] helyreallitas sikeres");
+    return;
+  }
+  uint32_t wait = imuNextBackoffMs(imuRecoverAttemptIdx, IMU_RECOVERY_BACKOFF_MS, IMU_RECOVERY_BACKOFF_STEPS);
+  if (imuRecoverAttemptIdx < 255) imuRecoverAttemptIdx++;
+  imuRecoverNotBeforeMs = millis() + wait;
+  DEBUG_PRINTF("[IMU] helyreallitas sikertelen, kovetkezo kiserlet %lu ms mulva\n", (unsigned long)wait);
+}
+
+// Commits one drain pass (oldest sample first). Each sample gets a timestamp
+// spaced back from "now" by the nominal report period, then becomes
+// imuPrev/imuCurr. Stack buffer only - no heap on this path.
+static void imuCommitBatch(const IMUSample *batch, uint8_t n) {
+  if (n == 0) return;
+  uint32_t tNow = (uint32_t)micros();
+  // Without a valid reference, start the spacing just before the batch.
+  uint32_t base = imuCurr.valid ? imuCurr.time
+                                : tNow - (uint32_t)n * IMU_REPORT_INTERVAL_US - 1u;
+  uint32_t times[IMU_BATCH_MAX];
+  imuAssignBatchTimes(tNow, IMU_REPORT_INTERVAL_US, base, n, times);
+  for (uint8_t i = 0; i < n; i++) {
+    imuPrev = imuCurr;
+    imuCurr = batch[i];
+    imuCurr.time = times[i];
+    imuCurr.valid = true;
+  }
+  if (n > imuMaxBatch) imuMaxBatch = n;
+}
+
 void imuTask() {
+  IMUSample batchBuf[IMU_BATCH_MAX];
+  uint8_t batchN = 0;
 
   if (!useBNO08x) {
     return;
   }
+
+  // Stalled-IMU recovery: runs instead of polling while the link is considered dead.
+  if (imuRecovering) {
+    imuRecoveryStep();
+    return;
+  }
+
+  // Poll limiter: getSensorEvent() at most every IMU_POLL_INTERVAL_US.
+  static uint32_t lastPollUs = 0;
+  uint32_t nowUs = (uint32_t)micros();
+  if ((uint32_t)(nowUs - lastPollUs) < IMU_POLL_INTERVAL_US) {
+    return;
+  }
+  lastPollUs = nowUs;
+
+  // Stale watchdog: last accepted sample too old -> start recovery.
+  if (imuCurr.valid && imuIsStale(nowUs, imuCurr.time, IMU_STALE_MS * 1000U)) {
+    DEBUG_PRINTF("[IMU] STALE: %lu ms ota nincs elfogadott minta - helyreallitas\n",
+                 (unsigned long)((nowUs - imuCurr.time) / 1000U));
+    imuCurr.valid = false;
+    imuPrev.valid = false;
+    // "No IMU" value for PANDA: 0/0/0, the same values the code sends when the
+    // IMU is absent (ypr stays zero-initialised when useBNO08x is false).
+    ypr.yaw = 0.0f;
+    ypr.pitch = 0.0f;
+    ypr.roll = 0.0f;
+    imuRecovering = true;
+    imuRecoverNotBeforeMs = millis();
+    imuRecoverAttemptIdx = 0;
+    imuRecoveryStep();
+    return;
+  }
   if (bno08x.wasReset()) {
     DEBUG_PRINTLN("sensor was reset ");
+    imuResetCount++;
+    imuYawOnReset(imuYaw);   // re-base yaw so the output stays continuous
+    imuPrev.valid = false;   // old reference no longer valid
+    imuCurr.valid = false;
     setReports();
   }
 
@@ -376,7 +512,21 @@ void imuTask() {
   // outlier check and all orientation math (SLERP, Euler conversion) is
   // deferred to calculateIMU(), which only runs once per incoming NMEA GGA
   // sentence (~10Hz). That is a ~10x reduction in expensive trig calls.
-  while (bno08x.getSensorEvent(&sensorValue)) {
+  // Each getSensorEvent() is one bus transaction. Only that call is locked, so
+  // the ADC task waits at most one BNO read (~1-5 ms), not the whole drain.
+  // If the mutex is busy, skip this pass (next loop() retries).
+  uint32_t bnoT0 = 0;
+  while (true) {
+    if (!i2cBusLock()) {
+      break;
+    }
+    bnoT0 = micros();
+    bool gotEvent = bno08x.getSensorEvent(&sensorValue);
+    i2cBusRecordBno((uint32_t)(micros() - bnoT0));
+    i2cBusUnlock();
+    if (!gotEvent) {
+      break;
+    }
 
     imuEvtCount++;
     if (sensorValue.sensorId != SH2_GAME_ROTATION_VECTOR) {
@@ -421,9 +571,18 @@ void imuTask() {
     // status: 0 = unreliable, 1..3 = low/medium/high confidence. This comes
     // straight from the chip's own fusion output, so checking it here is
     // free (no computation of our own).
-    if (sensorValue.status == 0 && imuCurr.valid) {
+    // Status-0 gate with grace: a short status-0 blip keeps the old reference,
+    // a longer run (e.g. right after a reset) is accepted and logged.
+    ImuStatusVerdict sv = imuStatusGate(imuStatusGate0, sensorValue.status,
+                                        millis(), IMU_STATUS0_GRACE_MS);
+    if (sv == IMU_STATUS_REJECT) {
       imuRejStatus++;
       continue;
+    }
+    if (sv == IMU_STATUS_ACCEPT_GRACE_EXPIRED) {
+      imuStatus0GraceEvents++;
+      DEBUG_PRINTF("[IMU] status=0 tartos >%lu ms - mintak elfogadva (esemeny #%lu)\n",
+                   (unsigned long)IMU_STATUS0_GRACE_MS, (unsigned long)imuStatus0GraceEvents);
     }
 
     if (!imuCurr.valid) {
@@ -434,23 +593,21 @@ void imuTask() {
     }
     imuAccCount++;
 
-    imuPrev = imuCurr;
-    // The vendored Adafruit_BNO08x I2C HAL never fills in the packet arrival
-    // timestamp (i2chal_read() leaves *t_us untouched and shtp_service() passes
-    // 0), so sh2_decodeSensorEvent() produces garbage stamps: ~0, or just below
-    // 2^32 via the (negated) Base Timestamp Reference - never the micros()
-    // timebase calculateIMU() assumes. On the wire this surfaced as a
-    // "[IMU] STALE ... <full uptime> ms" warning every 5 s and a dead SLERP
-    // path (span == 0). Stamp host-side at capture instead: same timebase as
-    // targetTimeUs, real ~10 ms spans, and the ~1-2 ms I2C read latency
-    // cancels out in the relative interpolation.
-    imuCurr.time = (uint32_t)micros();
-    imuCurr.qr = qr;
-    imuCurr.qi = qi;
-    imuCurr.qj = qj;
-    imuCurr.qk = qk;
-    imuCurr.valid = true;
+    // Collected into a bounded batch; timestamps are assigned in
+    // imuCommitBatch() (all reports of one drain arrive at ~the same micros()).
+    if (batchN == IMU_BATCH_MAX) {
+      imuCommitBatch(batchBuf, batchN);
+      batchN = 0;
+    }
+    batchBuf[batchN].time = 0;
+    batchBuf[batchN].qr = qr;
+    batchBuf[batchN].qi = qi;
+    batchBuf[batchN].qj = qj;
+    batchBuf[batchN].qk = qk;
+    batchBuf[batchN].valid = true;
+    batchN++;
   }
+  imuCommitBatch(batchBuf, batchN);
 
   // ── IMU health report (one line per 10 s) ─────────────────────────────────
   // Per-10 s deltas of the counters above + the age of the newest accepted
@@ -466,29 +623,65 @@ void imuTask() {
     uint32_t dStat = imuRejStatus - pStat, dOther = imuRejOther - pOther;
     pEvt = imuEvtCount; pAcc = imuAccCount; pNaN = imuRejNaN;
     pNorm = imuRejNorm; pStat = imuRejStatus; pOther = imuRejOther;
-    if (imuCurr.valid) {
-      DEBUG_PRINTF("[IMU] health: evt=%lu acc=%lu rejNaN=%lu rejNorm=%lu rejStat=%lu rejOther=%lu age=%lu ms\n",
-                   (unsigned long)dEvt, (unsigned long)dAcc, (unsigned long)dNaN,
-                   (unsigned long)dNorm, (unsigned long)dStat, (unsigned long)dOther,
-                   (unsigned long)((micros() - imuCurr.time) / 1000U));
-    } else {
-      DEBUG_PRINTF("[IMU] health: evt=%lu acc=%lu rejNaN=%lu rejNorm=%lu rejStat=%lu rejOther=%lu age=n/a (nincs minta)\n",
-                   (unsigned long)dEvt, (unsigned long)dAcc, (unsigned long)dNaN,
-                   (unsigned long)dNorm, (unsigned long)dStat, (unsigned long)dOther);
-    }
+    // Extended: lifetime resets / recovery attempts / status-0 grace events,
+    // current yaw offset, and the largest drain batch seen.
+    uint32_t ageMs = imuCurr.valid ? (uint32_t)((micros() - imuCurr.time) / 1000U) : 0;
+    DEBUG_PRINTF("[IMU] health: evt=%lu acc=%lu rejNaN=%lu rejNorm=%lu rejStat=%lu rejOther=%lu "
+                 "valid=%d age=%lu ms resets=%lu recov=%lu st0grace=%lu yawOff=%.1f maxBatch=%u\n",
+                 (unsigned long)dEvt, (unsigned long)dAcc, (unsigned long)dNaN,
+                 (unsigned long)dNorm, (unsigned long)dStat, (unsigned long)dOther,
+                 (int)imuCurr.valid, (unsigned long)ageMs,
+                 (unsigned long)imuResetCount, (unsigned long)imuRecoveryAttempts,
+                 (unsigned long)imuStatus0GraceEvents, (double)imuYaw.offset,
+                 (unsigned)imuMaxBatch);
+    imuMaxBatch = 0;  // max is per health window
+
+    // [I2C] line: shared-bus timings and steering-input safety counters.
+    // Window values (max/avg us, mutex wait) are cleared after printing.
+    DEBUG_PRINTF("[I2C] health: bnoMax=%luus bnoAvg=%luus adcMax=%luus adcAvg=%luus "
+                 "mutexWaitMax=%luus mutexTimeouts=%lu adcFail=%lu "
+                 "(mutex=%lu notReady=%lu bus=%lu retryOk=%lu) wasStale=%lu wasStaleNow=%d\n",
+                 (unsigned long)i2cBusBnoMaxUs(), (unsigned long)i2cBusBnoAvgUs(),
+                 (unsigned long)i2cBusAdcMaxUs(), (unsigned long)i2cBusAdcAvgUs(),
+                 (unsigned long)i2cBusMutexMaxWaitUs(),
+                 (unsigned long)i2cBusMutexTimeouts(),
+                 (unsigned long)adcFailCount(),
+                 (unsigned long)adcFailMutex(), (unsigned long)adcFailNotReady(),
+                 (unsigned long)adcFailBus(), (unsigned long)adcRetryOk(),
+                 (unsigned long)wasSteerGuard().staleEvents,
+                 (int)wasSteerGuard().stale);
+    i2cBusResetWindow();
   }
 }
 
 
 void initIMU() {
+  // Log every device on the shared bus (incl. the ADS1115 at 0x48); the ADC
+  // address is never used for the BNO08x (zI2CBus.cpp).
+  // Scan list = ADC address first, then the BNO candidates (single source: bno08xAddresses).
+  uint8_t scanList[1 + 2];
+  scanList[0] = ADS1115_I2C_ADDR;
+  for (int16_t k = 0; k < nrBNO08xAdresses && k < 2; k++) {
+    scanList[1 + k] = bno08xAddresses[k];
+  }
+  i2cBusFindBno(scanList, 1 + nrBNO08xAdresses);
+
   for (int16_t i = 0; i < nrBNO08xAdresses; i++) {
     bno08xAddress = bno08xAddresses[i];
+    if (bno08xAddress == ADS1115_I2C_ADDR) {
+      continue;  // the steering ADC is never the IMU
+    }
 
     DEBUG_PRINT("Checking for BNO08X at address 0x");
     DEBUG_PRINTLN(bno08xAddress, HEX);
-    
+
+    if (!i2cBusLock()) {
+      DEBUG_PRINTLN("[IMU] init: I2C mutex timeout, skipping address");
+      continue;
+    }
     Wire.beginTransmission(bno08xAddress);
     error = Wire.endTransmission();
+    i2cBusUnlock();
 
     if (error == 0) {
       DEBUG_PRINT("0x");
